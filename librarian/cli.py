@@ -6,64 +6,99 @@ A command-line interface for managing, indexing, and searching
 markdown documents with vector and full-text search capabilities.
 
 Usage:
-    librarian --help
-    librarian sources list
-    librarian docs list
-    librarian docs add <path>
-    librarian search "query"
-    librarian config show
+    libr --help
+    libr add <path>          # Add file or directory as source
+    libr rm <source>         # Remove source and its documents
+    libr list                # Show sources
+    libr search "query"      # Search documents
+    libr index               # Show index stats
+    libr index build         # Rebuild index
+    libr docs                # Show sources with doc counts
+    libr docs list           # List indexed documents
 """
 
 import asyncio
+import fnmatch
 import json
 import os
+import subprocess
+import sys
 from datetime import datetime
+from enum import Enum
 from pathlib import Path
-from typing import Annotated, Any, Optional
+from typing import Annotated, Any
 
 # Suppress verbose logging BEFORE any librarian imports
-os.environ.setdefault("LOGURU_LEVEL", "DEBUG")
+os.environ.setdefault("LOGURU_LEVEL", "ERROR")
 
 import typer
 from rich import print as rprint
 from rich.console import Console
 from rich.panel import Panel
 from rich.table import Table
-from rich.tree import Tree
 
 # Initialize Typer app
 app = typer.Typer(
-    name="librarian",
+    name="libr",
     help="Librarian - Markdown Document Management System",
     add_completion=True,
     rich_markup_mode="rich",
     invoke_without_command=True,
     no_args_is_help=True,
-    pretty_exceptions_short=True
+    pretty_exceptions_short=True,
 )
 
 # Sub-commands
-sources_app = typer.Typer(help="Manage document sources (directories)", no_args_is_help=True)
-docs_app = typer.Typer(help="Manage documents", no_args_is_help=True)
-config_app = typer.Typer(help="Configure librarian settings", no_args_is_help=True)
+index_app = typer.Typer(help="Index management", invoke_without_command=True)
+docs_app = typer.Typer(help="Document operations", invoke_without_command=True)
+config_app = typer.Typer(help="Configuration", invoke_without_command=True)
 
-app.add_typer(sources_app, name="sources")
+app.add_typer(index_app, name="index")
 app.add_typer(docs_app, name="docs")
 app.add_typer(config_app, name="config")
-
-
-@app.command("help", hidden=True)
-def help_cmd(ctx: typer.Context) -> None:
-    """Show this help message."""
-    if ctx.parent is not None:
-        console.print(ctx.parent.get_help())
-
 
 console = Console()
 
 # Config file path
 CONFIG_DIR = Path.home() / ".librarian"
 SOURCES_FILE = CONFIG_DIR / "sources.json"
+SETTINGS_FILE = CONFIG_DIR / "settings.json"
+
+
+# =============================================================================
+# Enums
+# =============================================================================
+
+
+class OutputFormat(str, Enum):
+    """Output format options."""
+
+    TABLE = "table"
+    JSON = "json"
+    PATHS = "paths"
+
+
+class SearchMode(str, Enum):
+    """Search mode options."""
+
+    HYBRID = "hybrid"
+    VECTOR = "vector"
+    KEYWORD = "keyword"
+
+
+class Timeframe(str, Enum):
+    """Time-based filter options."""
+
+    TODAY = "today"
+    YESTERDAY = "yesterday"
+    WEEK = "week"
+    MONTH = "month"
+    YEAR = "year"
+
+
+# =============================================================================
+# Helpers
+# =============================================================================
 
 
 def _load_sources() -> list[dict[str, Any]]:
@@ -80,6 +115,21 @@ def _save_sources(sources: list[dict[str, Any]]) -> None:
     CONFIG_DIR.mkdir(parents=True, exist_ok=True)
     with open(SOURCES_FILE, "w") as f:
         json.dump(sources, f, indent=2)
+
+
+def _load_settings() -> dict[str, Any]:
+    """Load user settings from config."""
+    if not SETTINGS_FILE.exists():
+        return {}
+    with open(SETTINGS_FILE) as f:
+        return json.load(f)
+
+
+def _save_settings(settings: dict[str, Any]) -> None:
+    """Save user settings to config."""
+    CONFIG_DIR.mkdir(parents=True, exist_ok=True)
+    with open(SETTINGS_FILE, "w") as f:
+        json.dump(settings, f, indent=2)
 
 
 def _run_async(coro: Any) -> Any:
@@ -119,67 +169,190 @@ def _get_config() -> dict[str, Any]:
     }
 
 
-# =============================================================================
-# Sources Commands
-# =============================================================================
-
-
-@sources_app.command("list")
-def sources_list() -> None:
-    """List all registered document sources."""
+def _find_source(name_or_path: str) -> dict | None:
+    """Find a source by name or path."""
     sources = _load_sources()
+    for s in sources:
+        if s.get("name") == name_or_path or s["path"] == name_or_path:
+            return s
+    return None
+
+
+def _get_source_doc_count(source: dict) -> int:
+    """Get count of indexed docs for a source."""
+    cfg = _get_config()
+    cfg["ensure_directories"]()
+    from librarian.storage.database import get_database
+
+    db = get_database()
+    documents = db.list_documents()
+    source_path = source["path"]
+    return sum(1 for d in documents if d.path.startswith(source_path))
+
+
+def _filter_display_sources(
+    sources: list[dict[str, Any]], include_all: bool = False
+) -> list[dict[str, Any]]:
+    """Filter out test data sources from display unless --all is specified."""
+    if include_all:
+        return sources
+    return [s for s in sources if "tests/data" not in s.get("path", "")]
+
+
+def _index_path(file_path: Path, verbose: bool = False) -> dict[str, Any]:
+    """Index a single file and return result."""
+    from librarian.server import _process_and_index_file
+
+    result = _process_and_index_file(file_path)
+    if verbose:
+        status = result.get("status", "")
+        if status == "created":
+            rprint(f"  [green]+[/green] {file_path}")
+        elif status == "updated":
+            rprint(f"  [yellow]~[/yellow] {file_path}")
+    return result
+
+
+def _get_editor() -> str:
+    """Get the user's preferred editor."""
+    return os.environ.get("EDITOR", os.environ.get("VISUAL", "vim"))
+
+
+def _open_in_editor(path: str) -> None:
+    """Open a file in the user's editor."""
+    editor = _get_editor()
+    subprocess.run([editor, path], check=False)
+
+
+def _copy_to_clipboard(text: str) -> bool:
+    """Copy text to clipboard. Returns True on success."""
+    try:
+        if sys.platform == "darwin":
+            subprocess.run(["pbcopy"], input=text.encode(), check=True)
+        elif sys.platform == "linux":
+            subprocess.run(
+                ["xclip", "-selection", "clipboard"],
+                input=text.encode(),
+                check=True,
+            )
+        elif sys.platform == "win32":
+            subprocess.run(["clip"], input=text.encode(), check=True)
+        else:
+            return False
+    except (subprocess.CalledProcessError, FileNotFoundError):
+        return False
+    return True
+
+
+def _matches_patterns(path: str, patterns: list[str]) -> bool:
+    """Check if path matches any of the glob patterns."""
+    for pattern in patterns:
+        # Match against full path and filename
+        if fnmatch.fnmatch(path, f"*{pattern}*"):
+            return True
+        if fnmatch.fnmatch(path, f"*/{pattern}"):
+            return True
+        if fnmatch.fnmatch(Path(path).name, pattern):
+            return True
+    return False
+
+
+def _get_timeframe_bounds(timeframe: Timeframe) -> tuple[datetime, datetime]:
+    """Get start and end datetime for a timeframe."""
+    from librarian.utils.timeframe import Timeframe as TF
+    from librarian.utils.timeframe import get_timeframe_bounds
+
+    tf_map = {
+        Timeframe.TODAY: TF.TODAY,
+        Timeframe.YESTERDAY: TF.YESTERDAY,
+        Timeframe.WEEK: TF.THIS_WEEK,
+        Timeframe.MONTH: TF.THIS_MONTH,
+        Timeframe.YEAR: TF.THIS_YEAR,
+    }
+    return get_timeframe_bounds(tf_map[timeframe])
+
+
+# =============================================================================
+# libr list - Show sources
+# =============================================================================
+
+
+@app.command("list")
+def list_sources(
+    all_sources: Annotated[
+        bool, typer.Option("--all", "-a", help="Include hidden/test sources")
+    ] = False,
+    output_json: Annotated[bool, typer.Option("--json", help="Output as JSON")] = False,
+) -> None:
+    """List all registered document sources."""
+    sources = _filter_display_sources(_load_sources(), include_all=all_sources)
+
+    if output_json:
+        print(json.dumps(sources, indent=2, default=str))
+        return
 
     if not sources:
         rprint(
             Panel(
                 "[yellow]No sources registered yet.[/yellow]\n\n"
-                "Add a source with: [cyan]librarian sources add <path>[/cyan]",
-                title="📂 Document Sources",
+                "Add a source with: [cyan]libr add <path>[/cyan]",
+                title="Document Sources",
             )
         )
         return
 
-    table = Table(title="📂 Document Sources", show_header=True, header_style="bold cyan")
+    table = Table(title="Document Sources", show_header=True, header_style="bold cyan")
     table.add_column("Name", style="green")
     table.add_column("Path", style="blue")
     table.add_column("Type", style="magenta")
     table.add_column("Status", style="yellow")
-    table.add_column("Files", justify="right")
 
     for source in sources:
         path = Path(source["path"])
-        status = "✓ Active" if path.exists() else "✗ Missing"
-        file_count = len(list(path.rglob("*.md"))) if path.exists() else 0
-        table.add_row(
-            source.get("name", path.name),
-            str(path),
-            source.get("type", "local"),
-            status,
-            str(file_count),
-        )
+        status = "Active" if path.exists() else "Missing"
+        src_type = "file" if source.get("is_file") else "dir"
+        table.add_row(source.get("name", path.name), str(path), src_type, status)
 
     console.print(table)
 
 
-@sources_app.command("add")
-def sources_add(
-    path: Annotated[str, typer.Argument(help="Path to the directory to add as a source")],
+# =============================================================================
+# libr add - Add source (file or directory)
+# =============================================================================
+
+
+@app.command("add")
+def add_source(
+    path: Annotated[str, typer.Argument(help="Path to file or directory to add")],
     name: Annotated[
-        Optional[str], typer.Option("--name", "-n", help="Custom name for the source")
+        str | None, typer.Option("--name", "-n", help="Custom name for the source")
     ] = None,
-    recursive: Annotated[
-        bool, typer.Option("--recursive/--no-recursive", "-r", help="Index subdirectories")
-    ] = True,
+    depth: Annotated[
+        int, typer.Option("--depth", "-d", help="Limit recursion depth (0=current dir only)")
+    ] = -1,
+    pattern: Annotated[
+        str | None,
+        typer.Option("--pattern", "-p", help="Glob pattern to include (e.g., 'notes/*.md')"),
+    ] = None,
+    exclude: Annotated[
+        list[str] | None,
+        typer.Option("--exclude", "-e", help="Patterns to exclude (can repeat)"),
+    ] = None,
+    dry_run: Annotated[
+        bool, typer.Option("--dry-run", help="Show what would be indexed without doing it")
+    ] = False,
+    verbose: Annotated[
+        bool, typer.Option("--verbose", "-v", help="Show files being indexed")
+    ] = False,
 ) -> None:
-    """Add a new document source directory."""
+    """Add a file or directory as a source and index it recursively."""
+    cfg = _get_config()
+    cfg["ensure_directories"]()
+
     source_path = Path(path).resolve()
 
     if not source_path.exists():
         rprint(f"[red]Error:[/red] Path does not exist: {source_path}")
-        raise typer.Exit(1)
-
-    if not source_path.is_dir():
-        rprint(f"[red]Error:[/red] Path is not a directory: {source_path}")
         raise typer.Exit(1)
 
     sources = _load_sources()
@@ -190,134 +363,438 @@ def sources_add(
             rprint(f"[yellow]Source already registered:[/yellow] {source_path}")
             return
 
+    is_file = source_path.is_file()
+
+    # Validate file type
+    if is_file and source_path.suffix != ".md":
+        rprint(f"[red]Error:[/red] Not a markdown file: {source_path}")
+        raise typer.Exit(1)
+
+    # Find files to index
+    if is_file:
+        files_to_index = [source_path]
+    else:
+        if depth == 0:
+            files_to_index = list(source_path.glob("*.md"))
+        else:
+            files_to_index = list(source_path.rglob("*.md"))
+
+        # Apply pattern filter
+        if pattern:
+            files_to_index = [f for f in files_to_index if fnmatch.fnmatch(str(f), f"*{pattern}")]
+
+        # Apply exclusions
+        if exclude:
+            files_to_index = [f for f in files_to_index if not _matches_patterns(str(f), exclude)]
+
+    # Dry run - just show what would be indexed
+    if dry_run:
+        rprint(f"\n[bold]Dry run[/bold] - would index {len(files_to_index)} files:\n")
+        for f in files_to_index[:50]:
+            rprint(f"  [green]+[/green] {f}")
+        if len(files_to_index) > 50:
+            rprint(f"  [dim]... and {len(files_to_index) - 50} more[/dim]")
+        return
+
+    # Create source entry
     source = {
         "name": name or source_path.name,
         "path": str(source_path),
         "type": "local",
-        "recursive": recursive,
+        "is_file": is_file,
+        "recursive": depth != 0,
+        "depth": depth,
+        "pattern": pattern,
+        "exclude": exclude,
         "added_at": datetime.now().isoformat(),
     }
 
     sources.append(source)
     _save_sources(sources)
 
-    # Count markdown files
-    md_files = list(source_path.rglob("*.md") if recursive else source_path.glob("*.md"))
+    # Index the source
+    from librarian.server import ingest_directory as server_ingest
 
-    rprint(
-        Panel(
-            f"[green]✓ Source added successfully![/green]\n\n"
-            f"Name: [cyan]{source['name']}[/cyan]\n"
-            f"Path: [blue]{source_path}[/blue]\n"
-            f"Markdown files found: [yellow]{len(md_files)}[/yellow]\n\n"
-            f"Index with: [cyan]librarian docs index[/cyan]",
-            title="📂 Source Added",
+    if is_file:
+        rprint("[cyan]Indexing file...[/cyan]")
+        try:
+            result = _index_path(source_path, verbose)
+            rprint(
+                Panel(
+                    f"[green]Source added and indexed![/green]\n\n"
+                    f"Name: [cyan]{source['name']}[/cyan]\n"
+                    f"Path: [blue]{source_path}[/blue]\n"
+                    f"Chunks: [yellow]{result.get('chunks', 0)}[/yellow]",
+                    title="Source Added",
+                )
+            )
+        except Exception as e:
+            rprint(f"[red]Error indexing:[/red] {e}")
+            raise typer.Exit(1) from None
+    else:
+        rprint("[cyan]Indexing directory...[/cyan]")
+        result = _run_async(
+            server_ingest(
+                context=None,  # type: ignore[arg-type]
+                directory=str(source_path),
+                recursive=depth != 0,
+                force_reindex=False,
+            )
         )
-    )
+
+        if verbose:
+            for file_info in result.get("files", []):
+                fpath = file_info.get("path", "")
+                status = file_info.get("status", "")
+                if status == "created":
+                    rprint(f"  [green]+[/green] {fpath}")
+                elif status == "updated":
+                    rprint(f"  [yellow]~[/yellow] {fpath}")
+
+        rprint(
+            Panel(
+                f"[green]Source added and indexed![/green]\n\n"
+                f"Name: [cyan]{source['name']}[/cyan]\n"
+                f"Path: [blue]{source_path}[/blue]\n"
+                f"Files found: [yellow]{len(files_to_index)}[/yellow]\n"
+                f"Indexed: [cyan]{result.get('indexed', 0)}[/cyan]",
+                title="Source Added",
+            )
+        )
 
 
-@sources_app.command("remove")
-def sources_remove(
-    name_or_path: Annotated[str, typer.Argument(help="Name or path of the source to remove")],
+# =============================================================================
+# libr rm - Remove source
+# =============================================================================
+
+
+@app.command("rm")
+def remove_source(
+    name: Annotated[str, typer.Argument(help="Name of the source to remove")],
     force: Annotated[bool, typer.Option("--force", "-f", help="Skip confirmation")] = False,
 ) -> None:
-    """Remove a document source."""
+    """Remove a source and its documents from the index."""
+    cfg = _get_config()
+    cfg["ensure_directories"]()
+
     sources = _load_sources()
     to_remove = None
 
     for source in sources:
-        if source.get("name") == name_or_path or source["path"] == name_or_path:
+        if source.get("name") == name:
             to_remove = source
             break
 
     if not to_remove:
-        rprint(f"[red]Error:[/red] Source not found: {name_or_path}")
+        rprint(f"[red]Error:[/red] Source not found: {name}")
+        rprint("\nAvailable sources:")
+        for s in sources:
+            rprint(f"  - {s.get('name')}")
         raise typer.Exit(1)
 
     if not force:
-        confirm = typer.confirm(f"Remove source '{to_remove['name']}'?")
+        confirm = typer.confirm(f"Remove source '{name}' and all its documents from the index?")
         if not confirm:
             rprint("[yellow]Cancelled.[/yellow]")
             return
 
+    # Remove documents from index
+    from librarian.storage.database import get_database
+
+    db = get_database()
+    source_path = to_remove["path"]
+
+    # Get all documents from this source
+    documents = db.list_documents()
+    removed_count = 0
+
+    for doc in documents:
+        if doc.path.startswith(source_path) and doc.id:
+            db.delete_chunks_by_document(doc.id)
+            db.delete_document(doc.id)
+            removed_count += 1
+
+    # Remove from sources list
     sources.remove(to_remove)
     _save_sources(sources)
-    rprint(f"[green]✓ Source removed:[/green] {to_remove['name']}")
+
+    rprint(
+        Panel(
+            f"[green]Source removed![/green]\n\n"
+            f"Name: [cyan]{name}[/cyan]\n"
+            f"Documents removed: [yellow]{removed_count}[/yellow]",
+            title="Source Removed",
+        )
+    )
 
 
-def _find_source(name_or_path: str) -> dict | None:
-    """Find a source by name or path."""
-    sources = _load_sources()
-    for s in sources:
-        if s.get("name") == name_or_path or s["path"] == name_or_path:
-            return s
-    return None
+# =============================================================================
+# libr index - Index management
+# =============================================================================
 
 
-def _build_file_tree(source: dict) -> Tree:
-    """Build a file tree for a source."""
-    source_path = Path(source["path"])
-    tree = Tree(f"📂 [bold cyan]{source['name']}[/bold cyan]")
-
-    if not source_path.exists():
-        return tree
-
-    recursive = source.get("recursive", True)
-    md_files = list(source_path.rglob("*.md") if recursive else source_path.glob("*.md"))
-
-    # Group by directory
-    dirs: dict[Path, list[Path]] = {}
-    for f in md_files:
-        dirs.setdefault(f.parent, []).append(f)
-
-    for dir_path, files in sorted(dirs.items()):
-        if dir_path == source_path:
-            for f in sorted(files):
-                tree.add(f"{f.name}")
-        else:
-            branch = tree.add(f"{dir_path.relative_to(source_path)}/")
-            for f in sorted(files):
-                branch.add(f"{f.name}")
-
-    return tree
-
-
-@sources_app.command("show")
-def sources_show(
-    name_or_path: Annotated[str, typer.Argument(help="Name or path of the source")],
+@index_app.callback(invoke_without_command=True)
+def index_stats(
+    ctx: typer.Context,
+    output_json: Annotated[bool, typer.Option("--json", help="Output as JSON")] = False,
 ) -> None:
-    """Show details about a specific source."""
-    source = _find_source(name_or_path)
-    if not source:
-        rprint(f"[red]Error:[/red] Source not found: {name_or_path}")
-        raise typer.Exit(1)
+    """Show index statistics."""
+    if ctx.invoked_subcommand is not None:
+        return
 
-    tree = _build_file_tree(source)
-    console.print(Panel(tree, title=f"Source: {source['name']}"))
+    cfg = _get_config()
+    cfg["ensure_directories"]()
 
-    # Show metadata
-    table = Table(show_header=False, box=None)
-    table.add_column("Key", style="cyan")
-    table.add_column("Value", style="white")
-    table.add_row("Path", source["path"])
-    table.add_row("Type", source.get("type", "local"))
-    table.add_row("Recursive", str(source.get("recursive", True)))
-    table.add_row("Added", source.get("added_at", "Unknown"))
+    from librarian.storage.database import get_database
+
+    db = get_database()
+    stats_data = db.get_stats()
+
+    if output_json:
+        print(json.dumps(stats_data, indent=2, default=str))
+        return
+
+    table = Table(title="Index Statistics", show_header=True, header_style="bold cyan")
+    table.add_column("Metric", style="green")
+    table.add_column("Value", style="yellow", justify="right")
+
+    table.add_row("Documents", str(stats_data.get("document_count", 0)))
+    table.add_row("Chunks", str(stats_data.get("chunk_count", 0)))
+    table.add_row("Embeddings", str(stats_data.get("embedding_count", 0)))
+    table.add_row("Database", str(stats_data.get("database_path", "N/A")))
 
     console.print(table)
 
+    sources = _load_sources()
+    if sources:
+        rprint(f"\n[dim]Sources: {len(sources)}[/dim]")
+
+
+@index_app.command("build")
+def index_build(
+    source: Annotated[
+        str | None, typer.Option("--source", "-s", help="Rebuild only this source")
+    ] = None,
+    confirm: Annotated[bool, typer.Option("--yes", "-y", help="Skip confirmation")] = False,
+    verbose: Annotated[bool, typer.Option("--verbose", "-v", help="Show files")] = False,
+) -> None:
+    """Rebuild the entire index from scratch."""
+    cfg = _get_config()
+    cfg["ensure_directories"]()
+
+    all_sources = _load_sources()
+    if not all_sources:
+        rprint("[yellow]No sources registered. Add a source first:[/yellow]")
+        rprint("  [cyan]libr add <path>[/cyan]")
+        raise typer.Exit(1)
+
+    # Filter to specific source if requested
+    if source:
+        sources = [s for s in all_sources if s.get("name") == source]
+        if not sources:
+            rprint(f"[red]Error:[/red] Source not found: {source}")
+            raise typer.Exit(1)
+    else:
+        sources = all_sources
+
+    if not confirm:
+        msg = f"specific source: {source}" if source else f"{len(sources)} sources"
+        rprint(
+            Panel(
+                f"[yellow]This will rebuild the index for {msg}.[/yellow]\n\n"
+                "This may take a while.",
+                title="Rebuild Index",
+            )
+        )
+        if not typer.confirm("Continue?"):
+            rprint("[yellow]Cancelled.[/yellow]")
+            raise typer.Exit(0)
+
+    from librarian.server import ingest_directory as server_ingest
+    from librarian.storage.database import get_database
+
+    db = get_database()
+
+    # If rebuilding specific source, only clear that source's documents
+    if source:
+        rprint(f"[cyan]Clearing documents for {source}...[/cyan]")
+        src_data = sources[0]
+        documents = db.list_documents()
+        for doc in documents:
+            if doc.path.startswith(src_data["path"]) and doc.id:
+                db.delete_chunks_by_document(doc.id)
+                db.delete_document(doc.id)
+    else:
+        rprint("[cyan]Clearing index...[/cyan]")
+        db.clear_all()
+
+    rprint("[cyan]Rebuilding...[/cyan]")
+    total_indexed = 0
+    total_errors = 0
+
+    for src in sources:
+        src_path = Path(src["path"])
+        if not src_path.exists():
+            rprint(f"[yellow]Skipping missing:[/yellow] {src['name']}")
+            continue
+
+        rprint(f"  {src['name']}...")
+
+        if src.get("is_file"):
+            try:
+                result = _index_path(src_path, verbose)
+                total_indexed += 1
+            except Exception as e:
+                rprint(f"  [red]Error:[/red] {e}")
+                total_errors += 1
+        else:
+            result = _run_async(
+                server_ingest(
+                    context=None,  # type: ignore[arg-type]
+                    directory=str(src_path),
+                    recursive=src.get("recursive", True),
+                    force_reindex=True,
+                )
+            )
+            total_indexed += result.get("indexed", 0) + result.get("updated", 0)
+            total_errors += len(result.get("errors", []))
+
+            if verbose:
+                for file_info in result.get("files", []):
+                    fpath = file_info.get("path", "")
+                    status = file_info.get("status", "")
+                    if status in ("created", "updated"):
+                        rprint(f"    [green]+[/green] {fpath}")
+
+    rprint(
+        Panel(
+            f"[green]Rebuild complete![/green]\n\n"
+            f"Indexed: [cyan]{total_indexed}[/cyan]\n"
+            f"Errors: [red]{total_errors}[/red]",
+            title="Build Results",
+        )
+    )
+
+
+@index_app.command("clean")
+def index_clean(
+    confirm: Annotated[bool, typer.Option("--yes", "-y", help="Skip confirmation")] = False,
+) -> None:
+    """Remove all indexed data (keeps sources list)."""
+    cfg = _get_config()
+    cfg["ensure_directories"]()
+
+    if not confirm:
+        rprint(
+            Panel(
+                "[yellow]This will remove all indexed documents and embeddings.[/yellow]\n\n"
+                "Source registrations will be kept.\n"
+                "Files on disk will NOT be deleted.",
+                title="Clean Index",
+            )
+        )
+        if not typer.confirm("Continue?"):
+            rprint("[yellow]Cancelled.[/yellow]")
+            raise typer.Exit(0)
+
+    from librarian.storage.database import get_database
+
+    db = get_database()
+    db.clear_all()
+
+    rprint("[green]Index cleared.[/green]")
+    rprint("[dim]Run 'libr index build' to rebuild.[/dim]")
+
+
+@index_app.command("clobber")
+def index_clobber(
+    confirm: Annotated[bool, typer.Option("--yes", "-y", help="Skip confirmation")] = False,
+) -> None:
+    """Remove everything and reinitialize database."""
+    cfg = _get_config()
+
+    if not confirm:
+        rprint(
+            Panel(
+                "[red]WARNING: This will delete EVERYTHING:[/red]\n\n"
+                "- All indexed documents\n"
+                "- All embeddings\n"
+                "- Database file\n\n"
+                "Source registrations will be kept.",
+                title="Clobber Index",
+            )
+        )
+        if not typer.confirm("Are you sure?"):
+            rprint("[yellow]Cancelled.[/yellow]")
+            raise typer.Exit(0)
+
+    db_path = Path(cfg["DATABASE_PATH"])
+    if db_path.exists():
+        db_path.unlink()
+        rprint(f"[green]Deleted:[/green] {db_path}")
+
+    # Reinitialize
+    cfg["ensure_directories"]()
+    from librarian.storage.database import get_database
+
+    get_database()
+    rprint("[green]Database reinitialized.[/green]")
+
 
 # =============================================================================
-# Docs Commands
+# libr docs - Document operations
 # =============================================================================
+
+
+@docs_app.callback(invoke_without_command=True)
+def docs_overview(ctx: typer.Context) -> None:
+    """Show sources with document counts."""
+    if ctx.invoked_subcommand is not None:
+        return
+
+    sources = _filter_display_sources(_load_sources())
+
+    if not sources:
+        rprint(
+            Panel(
+                "[yellow]No sources registered.[/yellow]\n\n"
+                "Add a source with: [cyan]libr add <path>[/cyan]",
+                title="Documents",
+            )
+        )
+        return
+
+    cfg = _get_config()
+    cfg["ensure_directories"]()
+
+    from librarian.storage.database import get_database
+
+    db = get_database()
+    all_docs = db.list_documents()
+
+    table = Table(title="Sources", show_header=True, header_style="bold cyan")
+    table.add_column("Name", style="green")
+    table.add_column("Path", style="blue")
+    table.add_column("Docs", justify="right", style="yellow")
+    table.add_column("Status")
+
+    for source in sources:
+        path = Path(source["path"])
+        status = "[green]Active[/green]" if path.exists() else "[red]Missing[/red]"
+        doc_count = sum(1 for d in all_docs if d.path.startswith(source["path"]))
+        table.add_row(source.get("name", path.name), str(path), str(doc_count), status)
+
+    console.print(table)
+    rprint(f"\n[dim]Total documents: {len(all_docs)}[/dim]")
 
 
 @docs_app.command("list")
 def docs_list(
-    source: Annotated[
-        Optional[str], typer.Option("--source", "-s", help="Filter by source name")
-    ] = None,
-    limit: Annotated[int, typer.Option("--limit", "-l", help="Maximum documents to show")] = 50,
+    source: Annotated[str | None, typer.Option("--source", "-s", help="Filter by source")] = None,
+    limit: Annotated[int, typer.Option("--limit", "-l", help="Max documents")] = 50,
+    output_format: Annotated[
+        OutputFormat, typer.Option("--format", "-f", help="Output format")
+    ] = OutputFormat.TABLE,
 ) -> None:
     """List all indexed documents."""
     cfg = _get_config()
@@ -329,299 +806,220 @@ def docs_list(
     documents = db.list_documents()
 
     if source:
-        sources = _load_sources()
-        source_path = None
-        for s in sources:
-            if s["name"] == source:
-                source_path = s["path"]
-                break
-        if source_path:
-            documents = [d for d in documents if d.path.startswith(source_path)]
+        src = _find_source(source)
+        if src:
+            documents = [d for d in documents if d.path.startswith(src["path"])]
 
     if not documents:
-        rprint(
-            Panel(
-                "[yellow]No documents indexed yet.[/yellow]\n\n"
-                "Index documents with: [cyan]librarian docs index[/cyan]",
-                title="Documents",
-            )
-        )
+        if output_format == OutputFormat.JSON:
+            print("[]")
+        else:
+            rprint("[yellow]No documents indexed.[/yellow]")
         return
 
+    # JSON output
+    if output_format == OutputFormat.JSON:
+        output = [{"id": d.id, "title": d.title, "path": d.path} for d in documents[:limit]]
+        print(json.dumps(output, indent=2))
+        return
+
+    # Paths-only output
+    if output_format == OutputFormat.PATHS:
+        for doc in documents[:limit]:
+            print(doc.path)
+        return
+
+    # Table output
     table = Table(
-        title=f"Indexed Documents ({len(documents)} total)",
+        title=f"Documents ({len(documents)} total)",
         show_header=True,
         header_style="bold cyan",
     )
     table.add_column("ID", style="dim", width=4)
     table.add_column("Title", style="green", max_width=40)
     table.add_column("Path", style="blue", max_width=50)
-    table.add_column("Updated", style="yellow", width=12)
 
+    home = str(Path.home())
     for doc in documents[:limit]:
-        # Handle updated_at as either datetime or string
-        if doc.updated_at:
-            if isinstance(doc.updated_at, str):
-                updated = doc.updated_at[:10]  # Take YYYY-MM-DD part
-            else:
-                updated = doc.updated_at.strftime("%Y-%m-%d")
-        else:
-            updated = "N/A"
-        table.add_row(str(doc.id), doc.title or "Untitled", doc.path, updated)
+        short_path = doc.path.replace(home, "~")
+        table.add_row(str(doc.id), doc.title or "Untitled", short_path)
 
     console.print(table)
 
     if len(documents) > limit:
-        rprint(
-            f"[dim]Showing {limit} of {len(documents)} documents. Use --limit to show more.[/dim]"
-        )
+        rprint(f"[dim]Showing {limit} of {len(documents)}. Use --limit for more.[/dim]")
 
 
-# Top-level shortcut for listing documents
-@app.command("list")
-def list_cmd(
-    source: Annotated[
-        Optional[str], typer.Option("--source", "-s", help="Filter by source name")
-    ] = None,
-    limit: Annotated[int, typer.Option("--limit", "-l", help="Maximum documents to show")] = 50,
+@docs_app.command("search")
+def docs_search(
+    query: Annotated[str, typer.Argument(help="Search query for document titles")],
+    limit: Annotated[int, typer.Option("--limit", "-l", help="Max results")] = 20,
+    output_format: Annotated[
+        OutputFormat, typer.Option("--format", "-f", help="Output format")
+    ] = OutputFormat.TABLE,
 ) -> None:
-    """List all indexed documents (shortcut for 'docs list')."""
-    docs_list(source=source, limit=limit)
-
-
-@docs_app.command("index")
-def docs_index(
-    source: Annotated[
-        Optional[str], typer.Option("--source", "-s", help="Index only a specific source")
-    ] = None,
-    force: Annotated[
-        bool, typer.Option("--force", "-f", help="Force re-index existing documents")
-    ] = False,
-    verbose: Annotated[
-        bool, typer.Option("--verbose", "-v", help="Show file paths being indexed")
-    ] = False,
-) -> None:
-    """Index documents from all sources using the server's ingest function."""
+    """Search document titles (not content)."""
     cfg = _get_config()
     cfg["ensure_directories"]()
 
-    sources = _load_sources()
-    if not sources:
-        rprint("[yellow]No sources registered. Add a source first:[/yellow]")
-        rprint("  [cyan]librarian sources add <path>[/cyan]")
-        raise typer.Exit(1)
+    from librarian.storage.database import get_database
 
-    if source:
-        sources = [s for s in sources if s["name"] == source]
-        if not sources:
-            rprint(f"[red]Source not found:[/red] {source}")
-            raise typer.Exit(1)
+    db = get_database()
+    documents = db.list_documents()
 
-    # Import and use the server's ingest function (lazy import)
-    from librarian.server import ingest_directory as server_ingest
+    query_lower = query.lower()
+    matches = [d for d in documents if d.title and query_lower in d.title.lower()]
 
-    total_indexed = 0
-    total_skipped = 0
-    total_errors = 0
+    if not matches:
+        if output_format == OutputFormat.JSON:
+            print("[]")
+        else:
+            rprint(f"[yellow]No documents matching '{query}'[/yellow]")
+        return
 
-    for src in sources:
-        src_path = Path(src["path"])
-        if not src_path.exists():
-            rprint(f"[yellow]Skipping missing source:[/yellow] {src['name']}")
-            continue
+    if output_format == OutputFormat.JSON:
+        output = [{"id": d.id, "title": d.title, "path": d.path} for d in matches[:limit]]
+        print(json.dumps(output, indent=2))
+        return
 
-        rprint(f"[cyan]Indexing {src['name']}...[/cyan]")
+    if output_format == OutputFormat.PATHS:
+        for doc in matches[:limit]:
+            print(doc.path)
+        return
 
-        # Use the server's async ingest function (decorated tool function)
-        result = _run_async(
-            server_ingest(
-                context=None,  # type: ignore[arg-type]
-                directory=str(src_path),
-                recursive=src.get("recursive", True),
-                force_reindex=force,
-            )
-        )
-
-        total_indexed += result.get("indexed", 0)
-        total_skipped += result.get("skipped", 0)
-        total_errors += len(result.get("errors", []))
-
-        # Print file paths in verbose mode
-        if verbose:
-            for file_info in result.get("files", []):
-                path = file_info.get("path", "")
-                status = file_info.get("status", "")
-                if status == "created":
-                    rprint(f"  [green]+[/green] {path}")
-                elif status == "updated":
-                    rprint(f"  [yellow]~[/yellow] {path}")
-                elif status == "skipped":
-                    rprint(f"  [dim]-[/dim] {path}")
-
-        # Show any errors with details
-        for err in result.get("errors", []):
-            err_path = err.get("path", "unknown")
-            err_msg = err.get("error", "Unknown error")
-            if "timeout" in err_msg.lower() or "timed out" in err_msg.lower():
-                rprint(f"[yellow]Timeout:[/yellow] {err_path} (file may be on cloud/network)")
-            else:
-                rprint(f"[red]Error:[/red] {err_path}: {err_msg}")
-
-    status = "complete" if total_errors == 0 else "complete with errors"
-    rprint(
-        Panel(
-            f"[green]Indexing {status}[/green]\n\n"
-            f"Indexed: [cyan]{total_indexed}[/cyan]\n"
-            f"Skipped: [yellow]{total_skipped}[/yellow]\n"
-            f"Errors: [red]{total_errors}[/red]",
-            title="Index Results",
-        )
+    table = Table(
+        title=f"Title Search: '{query}' ({len(matches)} matches)",
+        show_header=True,
+        header_style="bold cyan",
     )
+    table.add_column("ID", style="dim", width=4)
+    table.add_column("Title", style="green")
+    table.add_column("Path", style="blue", max_width=50)
 
-
-@docs_app.command("add")
-def docs_add(
-    path: Annotated[str, typer.Argument(help="Path to the markdown file to add")],
-) -> None:
-    """Add and index a single markdown file."""
-    cfg = _get_config()
-    cfg["ensure_directories"]()
-    file_path = Path(path).resolve()
-
-    if not file_path.exists():
-        rprint(f"[red]Error:[/red] File not found: {file_path}")
-        raise typer.Exit(1)
-
-    if file_path.suffix != ".md":
-        rprint(f"[red]Error:[/red] Not a markdown file: {file_path}")
-        raise typer.Exit(1)
-
-    # Use the server's helper function (lazy import)
-    from librarian.server import _process_and_index_file
-
-    with console.status(f"Indexing {file_path.name}..."):
-        try:
-            result = _process_and_index_file(file_path)
-            rprint(
-                Panel(
-                    f"[green]✓ Document indexed![/green]\n\n"
-                    f"Title: [cyan]{result['title']}[/cyan]\n"
-                    f"Path: [blue]{result['path']}[/blue]\n"
-                    f"Chunks: [yellow]{result['chunks']}[/yellow]\n"
-                    f"Status: {result['status']}",
-                    title="Document Added",
-                )
-            )
-        except Exception as e:
-            rprint(f"[red]Error indexing document:[/red] {e}")
-            raise typer.Exit(1) from None
-
-
-@docs_app.command("remove")
-def docs_remove(
-    path: Annotated[str, typer.Argument(help="Path to the document to remove")],
-    delete_file: Annotated[
-        bool, typer.Option("--delete-file", "-d", help="Also delete the file")
-    ] = False,
-    force: Annotated[bool, typer.Option("--force", "-f", help="Skip confirmation")] = False,
-) -> None:
-    """Remove a document from the index."""
-    cfg = _get_config()
-    cfg["ensure_directories"]()
-
-    # Lazy import
-    from librarian.server import delete_document as server_delete
-
-    if not force:
-        confirm = typer.confirm(f"Remove document at '{path}' from index?")
-        if not confirm:
-            rprint("[yellow]Cancelled.[/yellow]")
-            return
-
-    result = _run_async(server_delete(context=None, path=path, delete_file=delete_file))  # type: ignore[call-arg, arg-type]
-
-    if "error" in result:
-        rprint(f"[red]Error:[/red] {result['error']}")
-        raise typer.Exit(1)
-
-    rprint(f"[green]✓ Removed from index:[/green] {path}")
-    if delete_file and result.get("file_deleted"):
-        rprint("[green]✓ File deleted[/green]")
-
-
-@docs_app.command("show")
-def docs_show(
-    path: Annotated[str, typer.Argument(help="Path to the document")],
-) -> None:
-    """Show details about a specific document."""
-    cfg = _get_config()
-    cfg["ensure_directories"]()
-
-    # Lazy import
-    from librarian.server import read_document as server_read
-
-    result = _run_async(server_read(context=None, path=path))  # type: ignore[call-arg, arg-type]
-
-    if "error" in result:
-        rprint(f"[red]Error:[/red] {result['error']}")
-        raise typer.Exit(1)
-
-    console.print(Panel(f"[bold]{result.get('title', 'Untitled')}[/bold]", title="Document"))
-
-    table = Table(show_header=False, box=None)
-    table.add_column("Key", style="cyan")
-    table.add_column("Value", style="white")
-    table.add_row("Path", result.get("path", "N/A"))
-    table.add_row("Created", result.get("created_at", "N/A"))
-    table.add_row("Updated", result.get("updated_at", "N/A"))
-    if result.get("metadata"):
-        table.add_row("Metadata", json.dumps(result["metadata"], indent=2))
+    home = str(Path.home())
+    for doc in matches[:limit]:
+        short_path = doc.path.replace(home, "~")
+        table.add_row(str(doc.id), doc.title or "Untitled", short_path)
 
     console.print(table)
 
-    # Show content preview
-    content = result.get("content", "")
-    content_preview = content[:500] + "..." if len(content) > 500 else content
-    console.print(Panel(content_preview, title="Content Preview"))
-
 
 # =============================================================================
-# Search Command
+# libr search - Content search
 # =============================================================================
 
 
 @app.command("search")
 def search_cmd(
     query: Annotated[str, typer.Argument(help="Search query")],
-    limit: Annotated[int, typer.Option("--limit", "-l", help="Maximum results")] = 10,
+    limit: Annotated[int, typer.Option("--limit", "-l", help="Max results")] = 10,
     mode: Annotated[
-        str, typer.Option("--mode", "-m", help="Search mode: hybrid, vector, keyword")
-    ] = "hybrid",
+        SearchMode, typer.Option("--mode", "-m", help="Search mode")
+    ] = SearchMode.HYBRID,
+    source: Annotated[str | None, typer.Option("--source", "-s", help="Filter by source")] = None,
+    timeframe: Annotated[
+        Timeframe | None, typer.Option("--timeframe", "-t", help="Time filter")
+    ] = None,
+    output_format: Annotated[
+        OutputFormat, typer.Option("--format", "-f", help="Output format")
+    ] = OutputFormat.TABLE,
     verbose: Annotated[bool, typer.Option("--verbose", "-v", help="Show content")] = False,
+    open_result: Annotated[
+        bool, typer.Option("--open", "-o", help="Open first result in editor")
+    ] = False,
+    copy: Annotated[
+        bool, typer.Option("--copy", "-c", help="Copy first result content to clipboard")
+    ] = False,
 ) -> None:
-    """Search for documents using semantic and keyword search."""
+    """Search documents using semantic and keyword search."""
     cfg = _get_config()
     cfg["ensure_directories"]()
 
-    # Lazy import
     from librarian.server import keyword_search, search, vector_search
 
-    with console.status(f"Searching for '{query}'..."):
-        if mode == "vector":
-            results = _run_async(vector_search(context=None, query=query, limit=limit))  # type: ignore[call-arg, arg-type]
-        elif mode == "keyword":
-            results = _run_async(keyword_search(context=None, query=query, limit=limit))  # type: ignore[call-arg, arg-type]
+    with console.status("Searching..."):
+        if mode == SearchMode.VECTOR:
+            results = _run_async(vector_search(context=None, query=query, limit=limit))  # type: ignore[arg-type]
+        elif mode == SearchMode.KEYWORD:
+            results = _run_async(keyword_search(context=None, query=query, limit=limit))  # type: ignore[arg-type]
         else:
-            results = _run_async(search(context=None, query=query, limit=limit, use_mmr=True))  # type: ignore[call-arg, arg-type]
+            results = _run_async(search(context=None, query=query, limit=limit, use_mmr=True))  # type: ignore[arg-type]
+
+    # Filter by source
+    if source and results:
+        src = _find_source(source)
+        if src:
+            results = [r for r in results if r.get("document_path", "").startswith(src["path"])]
+
+    # Filter by timeframe
+    if timeframe and results:
+        start_dt, end_dt = _get_timeframe_bounds(timeframe)
+        filtered = []
+        from librarian.storage.database import get_database
+
+        db = get_database()
+        for r in results:
+            doc = db.get_document_by_path(r.get("document_path", ""))
+            if doc and doc.updated_at:
+                if isinstance(doc.updated_at, str):
+                    doc_dt = datetime.fromisoformat(doc.updated_at.replace("Z", "+00:00"))
+                else:
+                    doc_dt = doc.updated_at
+                if start_dt <= doc_dt <= end_dt:
+                    filtered.append(r)
+        results = filtered
 
     if not results:
-        rprint(Panel("[yellow]No results found.[/yellow]", title="Search Results"))
+        if output_format == OutputFormat.JSON:
+            print("[]")
+        else:
+            rprint("[yellow]No results found.[/yellow]")
         return
 
-    rprint(f"\n[bold]Search Results[/bold] - {len(results)} matches for '[green]{query}[/green]'\n")
+    # Handle special actions
+    if open_result:
+        first_path = results[0].get("document_path")
+        if first_path and Path(first_path).exists():
+            _open_in_editor(first_path)
+            rprint(f"[green]Opened:[/green] {first_path}")
+        return
+
+    if copy:
+        first_content = results[0].get("content", "")
+        if _copy_to_clipboard(first_content):
+            rprint("[green]Copied first result to clipboard.[/green]")
+        else:
+            rprint("[red]Failed to copy to clipboard.[/red]")
+        return
+
+    # JSON output
+    if output_format == OutputFormat.JSON:
+        output = [
+            {
+                "score": r.get("score", 0),
+                "document_path": r.get("document_path"),
+                "content": r.get("content"),
+                "heading_path": r.get("heading_path"),
+            }
+            for r in results
+        ]
+        print(json.dumps(output, indent=2))
+        return
+
+    # Paths-only output
+    if output_format == OutputFormat.PATHS:
+        seen = set()
+        for r in results:
+            path = r.get("document_path")
+            if path and path not in seen:
+                print(path)
+                seen.add(path)
+        return
+
+    # Table output
+    rprint(f"\n[bold]Results[/bold] - {len(results)} matches for '[green]{query}[/green]'\n")
 
     home = str(Path.home())
-
     table = Table(show_header=True, header_style="bold cyan", box=None)
     table.add_column("#", style="dim", width=3)
     table.add_column("Score", justify="right", width=7)
@@ -630,47 +1028,45 @@ def search_cmd(
     for i, result in enumerate(results, 1):
         score = result.get("score", 0)
         score_color = "green" if score > 0.7 else "yellow" if score > 0.4 else "red"
-        doc_path = result.get("document_path", "Unknown")
-        # Shorten path: replace home with ~
-        short_path = doc_path.replace(home, "~") if doc_path != "Unknown" else "Unknown"
-
-        table.add_row(
-            str(i),
-            f"[{score_color}]{score:.3f}[/{score_color}]",
-            short_path,
-        )
+        doc_path = result.get("document_path", "Unknown").replace(home, "~")
+        table.add_row(str(i), f"[{score_color}]{score:.3f}[/{score_color}]", doc_path)
 
     console.print(table)
 
-    # Show content in verbose mode
     if verbose and results:
-        rprint("\n[bold]Content Previews:[/bold]\n")
+        rprint("\n[bold]Content:[/bold]\n")
         for i, result in enumerate(results, 1):
-            score = result.get("score", 0)
-            content = result.get("content", "")[:300]
-            content = content.replace("\n", " ").strip()
+            content = result.get("content", "")[:300].replace("\n", " ").strip()
             if len(result.get("content", "")) > 300:
                 content += "..."
             rprint(f"[dim]{i}.[/dim] {content}\n")
 
 
 # =============================================================================
-# Config Commands
+# libr config - Configuration
 # =============================================================================
+
+
+@config_app.callback(invoke_without_command=True)
+def config_default(ctx: typer.Context) -> None:
+    """Show current configuration."""
+    if ctx.invoked_subcommand is not None:
+        return
+    config_show()
 
 
 @config_app.command("show")
 def config_show() -> None:
     """Show current configuration."""
     cfg = _get_config()
+    settings = _load_settings()
 
-    table = Table(title="Librarian Configuration", show_header=True, header_style="bold cyan")
+    table = Table(title="Configuration", show_header=True, header_style="bold cyan")
     table.add_column("Setting", style="green")
     table.add_column("Value", style="yellow")
     table.add_column("Source", style="dim")
 
-    config_items = [
-        ("Documents Path", cfg["DOCUMENTS_PATH"], "DOCUMENTS_PATH"),
+    items = [
         ("Database Path", cfg["DATABASE_PATH"], "DATABASE_PATH"),
         ("Embedding Model", cfg["EMBEDDING_MODEL"], "EMBEDDING_MODEL"),
         ("Chunk Size", str(cfg["CHUNK_SIZE"]), "CHUNK_SIZE"),
@@ -680,8 +1076,14 @@ def config_show() -> None:
         ("Hybrid Alpha", str(cfg["HYBRID_ALPHA"]), "HYBRID_ALPHA"),
     ]
 
-    for name, value, env_var in config_items:
-        source = "env" if os.environ.get(env_var) else "default"
+    for name, value, env_var in items:
+        if env_var in settings:
+            source = "settings"
+            value = str(settings[env_var])
+        elif os.environ.get(env_var):
+            source = "env"
+        else:
+            source = "default"
         table.add_row(name, value, source)
 
     console.print(table)
@@ -691,155 +1093,113 @@ def config_show() -> None:
 def config_path() -> None:
     """Show configuration file paths."""
     cfg = _get_config()
-    rprint(f"Config directory: [cyan]{CONFIG_DIR}[/cyan]")
-    rprint(f"Sources file: [cyan]{SOURCES_FILE}[/cyan]")
+    rprint(f"Config: [cyan]{CONFIG_DIR}[/cyan]")
+    rprint(f"Sources: [cyan]{SOURCES_FILE}[/cyan]")
+    rprint(f"Settings: [cyan]{SETTINGS_FILE}[/cyan]")
     rprint(f"Database: [cyan]{cfg['DATABASE_PATH']}[/cyan]")
 
 
-# =============================================================================
-# Stats Command
-# =============================================================================
-
-
-@app.command("stats")
-def stats() -> None:
-    """Show index statistics."""
-    cfg = _get_config()
-    cfg["ensure_directories"]()
-
-    # Lazy import
-    from librarian.server import get_stats as server_stats
-
-    stats_data = _run_async(server_stats(context=None))  # type: ignore[call-arg, arg-type]
-
-    table = Table(title="Index Statistics", show_header=True, header_style="bold cyan")
-    table.add_column("Metric", style="green")
-    table.add_column("Value", style="yellow", justify="right")
-
-    table.add_row("Documents", str(stats_data.get("document_count", 0)))
-    table.add_row("Chunks", str(stats_data.get("chunk_count", 0)))
-
-    console.print(table)
-
-    # Show config
-    if "config" in stats_data:
-        config_table = Table(title="Configuration", show_header=False, box=None)
-        config_table.add_column("Key", style="cyan")
-        config_table.add_column("Value", style="white")
-
-        for key, value in stats_data["config"].items():
-            config_table.add_row(key, str(value))
-
-        console.print(config_table)
-
-
-# =============================================================================
-# Rebuild Command
-# =============================================================================
-
-
-@app.command("rebuild")
-def rebuild(
-    confirm: Annotated[bool, typer.Option("--yes", "-y", help="Skip confirmation prompt")] = False,
-    verbose: Annotated[
-        bool, typer.Option("--verbose", "-v", help="Show file paths being indexed")
-    ] = False,
+@config_app.command("get")
+def config_get(
+    key: Annotated[str, typer.Argument(help="Configuration key to get")],
 ) -> None:
-    """
-    Rebuild the entire index from scratch.
-
-    Use this when changing embedding models or to fix index corruption.
-    Deletes all existing data and re-indexes all sources.
-    """
+    """Get a specific configuration value."""
     cfg = _get_config()
-    cfg["ensure_directories"]()
+    settings = _load_settings()
 
-    sources = _load_sources()
-    if not sources:
-        rprint("[yellow]No sources registered. Nothing to rebuild.[/yellow]")
+    # Check settings file first, then env, then defaults
+    if key in settings:
+        print(settings[key])
+    elif key in cfg:
+        print(cfg[key])
+    elif os.environ.get(key):
+        print(os.environ[key])
+    else:
+        rprint(f"[red]Unknown configuration key:[/red] {key}")
+        rprint("\nAvailable keys:")
+        for k in cfg:
+            if k != "ensure_directories":
+                rprint(f"  - {k}")
         raise typer.Exit(1)
 
-    # Show warning and get confirmation
-    if not confirm:
-        rprint(
-            Panel(
-                "[yellow]Warning: This will delete all indexed data "
-                "and rebuild from scratch.[/yellow]\n\n"
-                f"Sources to re-index: {len(sources)}\n"
-                "This may take a while depending on the number of documents.",
-                title="Rebuild Index",
-            )
-        )
-        if not typer.confirm("Continue with rebuild?"):
-            rprint("[yellow]Rebuild cancelled.[/yellow]")
-            raise typer.Exit(0)
 
-    # Clear the database
-    rprint("[cyan]Clearing existing index...[/cyan]")
-    from librarian.storage.database import get_database
+@config_app.command("set")
+def config_set(
+    key: Annotated[str, typer.Argument(help="Configuration key to set")],
+    value: Annotated[str, typer.Argument(help="Value to set")],
+) -> None:
+    """Set a configuration value (persisted to settings file)."""
+    valid_keys = {
+        "DATABASE_PATH",
+        "EMBEDDING_MODEL",
+        "CHUNK_SIZE",
+        "CHUNK_OVERLAP",
+        "SEARCH_LIMIT",
+        "MMR_LAMBDA",
+        "HYBRID_ALPHA",
+    }
 
-    db = get_database()
-    db.clear_all()
-    rprint("[green]Index cleared.[/green]")
+    if key not in valid_keys:
+        rprint(f"[red]Invalid configuration key:[/red] {key}")
+        rprint("\nValid keys:")
+        for k in sorted(valid_keys):
+            rprint(f"  - {k}")
+        raise typer.Exit(1)
 
-    # Re-index all sources with force
-    rprint("[cyan]Re-indexing all sources...[/cyan]")
-    from librarian.server import ingest_directory as server_ingest
+    settings = _load_settings()
 
-    total_indexed = 0
-    total_errors = 0
+    # Type conversion for numeric values
+    if key in ("CHUNK_SIZE", "CHUNK_OVERLAP", "SEARCH_LIMIT"):
+        try:
+            settings[key] = int(value)
+        except ValueError:
+            rprint(f"[red]Error:[/red] {key} must be an integer")
+            raise typer.Exit(1) from None
+    elif key in ("MMR_LAMBDA", "HYBRID_ALPHA"):
+        try:
+            settings[key] = float(value)
+        except ValueError:
+            rprint(f"[red]Error:[/red] {key} must be a number")
+            raise typer.Exit(1) from None
+    else:
+        settings[key] = value
 
-    for src in sources:
-        src_path = Path(src["path"])
-        if not src_path.exists():
-            rprint(f"[yellow]Skipping missing source:[/yellow] {src['name']}")
-            continue
+    _save_settings(settings)
+    rprint(f"[green]Set {key}=[/green]{value}")
+    rprint("[dim]Note: Restart 'libr serve' for changes to take effect.[/dim]")
 
-        rprint(f"  Indexing {src['name']}...")
 
-        result = _run_async(
-            server_ingest(
-                context=None,  # type: ignore[arg-type]
-                directory=str(src_path),
-                recursive=src.get("recursive", True),
-                force_reindex=True,
-            )
-        )
+@config_app.command("edit")
+def config_edit() -> None:
+    """Open settings file in your editor."""
+    CONFIG_DIR.mkdir(parents=True, exist_ok=True)
 
-        total_indexed += result.get("indexed", 0) + result.get("updated", 0)
-        total_errors += len(result.get("errors", []))
+    # Ensure settings file exists
+    if not SETTINGS_FILE.exists():
+        _save_settings({})
 
-        # Print file paths in verbose mode
-        if verbose:
-            for file_info in result.get("files", []):
-                path = file_info.get("path", "")
-                status = file_info.get("status", "")
-                if status == "created":
-                    rprint(f"    [green]+[/green] {path}")
-                elif status == "updated":
-                    rprint(f"    [yellow]~[/yellow] {path}")
+    editor = _get_editor()
+    rprint(f"[cyan]Opening {SETTINGS_FILE} in {editor}...[/cyan]")
+    _open_in_editor(str(SETTINGS_FILE))
 
-        for err in result.get("errors", []):
-            err_path = err.get("path", "unknown")
-            err_msg = err.get("error", "Unknown error")
-            if "timeout" in err_msg.lower():
-                rprint(f"  [yellow]Timeout:[/yellow] {err_path}")
-            else:
-                rprint(f"  [red]Error:[/red] {err_path}: {err_msg}")
 
-    status = "complete" if total_errors == 0 else "complete with errors"
-    rprint(
-        Panel(
-            f"[green]Rebuild {status}[/green]\n\n"
-            f"Documents indexed: [cyan]{total_indexed}[/cyan]\n"
-            f"Errors: [red]{total_errors}[/red]",
-            title="Rebuild Results",
-        )
-    )
+@config_app.command("reset")
+def config_reset(
+    confirm: Annotated[bool, typer.Option("--yes", "-y", help="Skip confirmation")] = False,
+) -> None:
+    """Reset all settings to defaults."""
+    if not confirm and not typer.confirm("Reset all settings to defaults?"):
+        rprint("[yellow]Cancelled.[/yellow]")
+        return
+
+    if SETTINGS_FILE.exists():
+        SETTINGS_FILE.unlink()
+
+    rprint("[green]Settings reset to defaults.[/green]")
 
 
 # =============================================================================
-# Server Command
+# libr serve - MCP Server
 # =============================================================================
 
 
@@ -848,83 +1208,47 @@ def serve(
     transport: Annotated[str, typer.Argument(help="Transport: stdio or http")] = "stdio",
     host: Annotated[str, typer.Option("--host", "-h", help="HTTP host")] = "127.0.0.1",
     port: Annotated[int, typer.Option("--port", "-p", help="HTTP port")] = 8000,
+    log_level: Annotated[
+        str, typer.Option("--log-level", help="Log level (debug, info, warning, error)")
+    ] = "warning",
 ) -> None:
     """Start the MCP server."""
-    import sys
+    import logging
 
     from librarian.server import app as mcp_app
 
-    if transport == "stdio":
-        # For stdio, redirect all logging to stderr to keep stdout clean for JSON-RPC
-        import logging
+    level_map = {
+        "debug": logging.DEBUG,
+        "info": logging.INFO,
+        "warning": logging.WARNING,
+        "error": logging.ERROR,
+    }
+    log_lvl = level_map.get(log_level.lower(), logging.WARNING)
 
+    if transport == "stdio":
         logging.basicConfig(
-            level=logging.WARNING,
+            level=log_lvl,
             format="%(name)s: %(message)s",
             stream=sys.stderr,
         )
-        # Silence noisy loggers
         logging.getLogger("httpx").setLevel(logging.ERROR)
         logging.getLogger("httpcore").setLevel(logging.ERROR)
     else:
+        logging.basicConfig(level=log_lvl)
         rprint(f"[green]Starting HTTP server on {host}:{port}...[/green]")
 
     mcp_app.run(transport=transport, host=host, port=port)  # type: ignore[arg-type]
 
 
 # =============================================================================
-# Version Command
+# libr version
 # =============================================================================
 
 
 @app.command("version", hidden=True)
 def version() -> None:
-    """Show version information."""
+    """Show version."""
     rprint("Librarian v0.5.0")
-
-
-# =============================================================================
-# Init Command
-# =============================================================================
-
-
-@app.command("init")
-def init(
-    path: Annotated[Optional[str], typer.Argument(help="Directory to initialize")] = None,
-) -> None:
-    """Initialize librarian in a directory."""
-    target = Path(path).resolve() if path else Path.cwd()
-
-    # Create config directory
-    CONFIG_DIR.mkdir(parents=True, exist_ok=True)
-
-    # Add current directory as source if not already
-    sources = _load_sources()
-    for s in sources:
-        if Path(s["path"]).resolve() == target:
-            rprint(f"[yellow]Already initialized:[/yellow] {target}")
-            return
-
-    source = {
-        "name": target.name,
-        "path": str(target),
-        "type": "local",
-        "recursive": True,
-        "added_at": datetime.now().isoformat(),
-    }
-    sources.append(source)
-    _save_sources(sources)
-
-    rprint(
-        Panel(
-            f"[green]✓ Initialized librarian![/green]\n\n"
-            f"Directory: [cyan]{target}[/cyan]\n\n"
-            f"Next steps:\n"
-            f"  1. Index documents: [cyan]librarian docs index[/cyan]\n"
-            f"  2. Search: [cyan]librarian search 'your query'[/cyan]",
-            title="Librarian Initialized",
-        )
-    )
 
 
 if __name__ == "__main__":
