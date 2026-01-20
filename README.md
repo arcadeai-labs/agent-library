@@ -1,29 +1,30 @@
 # Librarian
 
-A markdown document management system with vector and full-text search, built on [Arcade](https://arcade.dev) for the Model Context Protocol (MCP).
+A personal knowledge library for AI agents, built on [Arcade](https://arcade.dev) for the Model Context Protocol (MCP).
 
 ## Overview
 
-Librarian indexes markdown files and provides semantic search through MCP tools. It combines vector similarity search with full-text keyword search for accurate retrieval.
+Librarian provides AI agents with persistent storage for text, documents, and knowledge. Agents can store information and retrieve it later through semantic and keyword search, maintaining context across conversations.
 
 ```mermaid
 graph LR
-    A[Markdown Files] --> B[Parser]
+    A[Agent Stores Info] --> B[Parser]
     B --> C[Chunker]
     C --> D[Embedder]
     D --> E[(SQLite + vec)]
-    F[Query] --> G[Hybrid Search]
+    F[Agent Queries] --> G[Hybrid Search]
     E --> G
-    G --> H[Results]
+    G --> H[Relevant Context]
 ```
 
 ## Features
 
+- Persistent knowledge storage for AI agents
 - SQLite storage with `sqlite-vec` for vector search
 - Full-text search using FTS5 with BM25 ranking
-- Hybrid search combining vector and keyword matching
+- Hybrid search combining semantic and keyword matching
 - Max Marginal Relevance (MMR) for diverse results
-- Configurable embedding models via sentence-transformers
+- Configurable embedding models (local or OpenAI-compatible API)
 - Header-aware text chunking with overlap
 - Time-bounded search filters
 - CLI and MCP server interfaces
@@ -45,20 +46,20 @@ uv pip install -e ".[dev]"
 ## CLI Usage
 
 ```bash
-# Initialize current directory
-libr init
+# Add files to the library
+libr add ~/notes
 
-# Add a document source
-libr sources add ~/notes --name "Notes"
-
-# Index documents
-libr docs index
-
-# Search
+# Search the library
 libr search "machine learning concepts"
 
-# List indexed documents
-libr docs list
+# List sources
+libr list
+
+# View library statistics
+libr index
+
+# Rebuild the index
+libr index build
 ```
 
 ## MCP Server
@@ -79,16 +80,17 @@ See the [Arcade MCP documentation](https://docs.arcade.dev) for integration deta
 
 | Tool | Description |
 |------|-------------|
-| `Librarian_Search` | Hybrid vector + keyword search with MMR |
-| `Librarian_VectorSearch` | Pure semantic similarity search |
-| `Librarian_KeywordSearch` | Full-text keyword search |
-| `Librarian_IngestDirectory` | Index markdown files from a directory |
-| `Librarian_AddDocument` | Create a new document |
-| `Librarian_UpdateDocument` | Update document content |
-| `Librarian_ReadDocument` | Read document content |
-| `Librarian_DeleteDocument` | Remove from index |
-| `Librarian_ListDocuments` | List indexed documents |
-| `Librarian_GetStats` | Index statistics |
+| `Librarian_SearchLibrary` | Search the library with hybrid vector + keyword search |
+| `Librarian_SemanticSearchLibrary` | Find content by meaning (semantic similarity) |
+| `Librarian_KeywordSearchLibrary` | Find content by exact keywords |
+| `Librarian_SearchLibraryByDates` | Search within a date range |
+| `Librarian_AddToLibrary` | Store new content in the library |
+| `Librarian_UpdateLibraryDoc` | Update existing content |
+| `Librarian_ReadFromLibrary` | Read full document content |
+| `Librarian_RemoveFromLibrary` | Remove content from the library |
+| `Librarian_ListLibraryContents` | List all stored content |
+| `Librarian_IndexDirectoryToLibrary` | Bulk import files |
+| `Librarian_GetLibraryStats` | Library statistics |
 
 ## Configuration
 
@@ -96,9 +98,12 @@ Set via environment variables:
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `DOCUMENTS_PATH` | `./documents` | Root directory for markdown files |
+| `DOCUMENTS_PATH` | `./documents` | Root directory for files |
 | `DATABASE_PATH` | `~/.librarian/index.db` | SQLite database location |
-| `EMBEDDING_MODEL` | `all-MiniLM-L6-v2` | Sentence transformer model |
+| `EMBEDDING_PROVIDER` | `openai` | `local` or `openai` |
+| `EMBEDDING_MODEL` | `all-MiniLM-L6-v2` | Local model name |
+| `OPENAI_API_BASE` | `http://localhost:7171/v1` | OpenAI-compatible API URL |
+| `OPENAI_EMBEDDING_MODEL` | `qwen3-embedding-06b` | API model name |
 | `CHUNK_SIZE` | `512` | Max characters per chunk |
 | `CHUNK_OVERLAP` | `50` | Overlap between chunks |
 | `SEARCH_LIMIT` | `10` | Default results limit |
@@ -112,17 +117,20 @@ librarian/
 ├── cli.py           # Command-line interface
 ├── server.py        # MCP server and tool definitions
 ├── config.py        # Configuration management
-├── timeframe.py     # Time filter utilities
+├── indexing.py      # Document indexing service
+├── types.py         # Shared type definitions
 ├── storage/
 │   ├── database.py  # SQLite operations
 │   ├── vector_store.py  # sqlite-vec search
 │   └── fts_store.py     # FTS5 search
 ├── processing/
-│   ├── parser.py    # Markdown parsing
-│   ├── chunker.py   # Text chunking
-│   └── embedder.py  # Embedding generation
-└── retrieval/
-    └── search.py    # Hybrid search + MMR
+│   ├── embed/       # Embedding providers
+│   ├── parsers/     # Document parsers
+│   └── transform/   # Text chunking
+├── retrieval/
+│   └── search.py    # Hybrid search + MMR
+└── utils/
+    └── timeframe.py # Time filter utilities
 ```
 
 ## Development
@@ -134,6 +142,7 @@ make lint       # Run linter
 make format     # Format code
 make typecheck  # Type checking
 make check      # All checks
+make evals      # Run evaluations
 ```
 
 ## Resources

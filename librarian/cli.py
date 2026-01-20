@@ -413,7 +413,7 @@ def add_source(
     _save_sources(sources)
 
     # Index the source
-    from librarian.server import ingest_directory as server_ingest
+    from librarian.server import index_directory_to_library as server_ingest
 
     if is_file:
         rprint("[cyan]Indexing file...[/cyan]")
@@ -610,7 +610,7 @@ def index_build(
             rprint("[yellow]Cancelled.[/yellow]")
             raise typer.Exit(0)
 
-    from librarian.server import ingest_directory as server_ingest
+    from librarian.server import index_directory_to_library as server_ingest
     from librarian.storage.database import get_database
 
     db = get_database()
@@ -935,15 +935,19 @@ def search_cmd(
     cfg = _get_config()
     cfg["ensure_directories"]()
 
-    from librarian.server import keyword_search, search, vector_search
+    from librarian.server import (
+        keyword_search_library,
+        search_library,
+        semantic_search_library,
+    )
 
     with console.status("Searching..."):
         if mode == SearchMode.VECTOR:
-            results = _run_async(vector_search(context=None, query=query, limit=limit))  # type: ignore[arg-type]
+            results = _run_async(semantic_search_library(context=None, query=query, limit=limit))  # type: ignore[arg-type]
         elif mode == SearchMode.KEYWORD:
-            results = _run_async(keyword_search(context=None, query=query, limit=limit))  # type: ignore[arg-type]
+            results = _run_async(keyword_search_library(context=None, query=query, limit=limit))  # type: ignore[arg-type]
         else:
-            results = _run_async(search(context=None, query=query, limit=limit, use_mmr=True))  # type: ignore[arg-type]
+            results = _run_async(search_library(context=None, query=query, limit=limit, use_mmr=True))  # type: ignore[arg-type]
 
     # Filter by source
     if source and results:

@@ -2,7 +2,7 @@
 Evaluation suite for Librarian MCP tools.
 
 This module defines comprehensive test cases to evaluate how well LLMs
-use the document management tools correctly.
+use the agent library tools correctly.
 
 Run with:
     arcade evals . -p openai
@@ -31,10 +31,11 @@ ExpectedMCPToolCall = arcade_evals.ExpectedMCPToolCall
 async def search_tools_eval() -> EvalSuite:
     """Evaluate search tool usage and query understanding."""
     suite = EvalSuite(
-        name="Search Tools",
+        name="Library Search Tools",
         system_message=(
-            "You are a helpful assistant that helps users search and manage their "
-            "markdown documents. Use the available tools to find relevant information."
+            "You are a helpful assistant with access to a personal knowledge library. "
+            "Use the library tools to store, search, and retrieve information. "
+            "The library persists across sessions and contains notes, documents, and knowledge."
         ),
         rubric=EvalRubric(fail_threshold=0.75, warn_threshold=0.85),
     )
@@ -53,7 +54,7 @@ async def search_tools_eval() -> EvalSuite:
         user_message="Find my notes about Python programming",
         expected_tool_calls=[
             ExpectedMCPToolCall(
-                "Librarian_Search",
+                "Librarian_SearchLibrary",
                 {"query": "Python programming", "limit": 10},
             )
         ],
@@ -65,10 +66,10 @@ async def search_tools_eval() -> EvalSuite:
 
     suite.add_case(
         name="Search with specific limit",
-        user_message="Show me the top 5 documents about machine learning",
+        user_message="Show me the top 5 documents about machine learning from my library",
         expected_tool_calls=[
             ExpectedMCPToolCall(
-                "Librarian_Search",
+                "Librarian_SearchLibrary",
                 {"query": "machine learning", "limit": 5},
             )
         ],
@@ -80,10 +81,10 @@ async def search_tools_eval() -> EvalSuite:
 
     suite.add_case(
         name="Search for meeting notes",
-        user_message="Find all my meeting notes from the project kickoff",
+        user_message="Find all my meeting notes from the project kickoff in my library",
         expected_tool_calls=[
             ExpectedMCPToolCall(
-                "Librarian_Search",
+                "Librarian_SearchLibrary",
                 {"query": "meeting notes project kickoff"},
             )
         ],
@@ -98,10 +99,10 @@ async def search_tools_eval() -> EvalSuite:
 
     suite.add_case(
         name="Search with today timeframe",
-        user_message="What did I write today?",
+        user_message="What did I add to my library today?",
         expected_tool_calls=[
             ExpectedMCPToolCall(
-                "Librarian_Search",
+                "Librarian_SearchLibrary",
                 {"query": "notes", "timeframe": "today"},
             )
         ],
@@ -113,10 +114,10 @@ async def search_tools_eval() -> EvalSuite:
 
     suite.add_case(
         name="Search this week",
-        user_message="Show me everything I documented this week about the API design",
+        user_message="Show me everything I stored this week about the API design",
         expected_tool_calls=[
             ExpectedMCPToolCall(
-                "Librarian_Search",
+                "Librarian_SearchLibrary",
                 {"query": "API design", "timeframe": "this_week"},
             )
         ],
@@ -131,7 +132,7 @@ async def search_tools_eval() -> EvalSuite:
         user_message="Find recent notes from the past week about database migrations",
         expected_tool_calls=[
             ExpectedMCPToolCall(
-                "Librarian_Search",
+                "Librarian_SearchLibrary",
                 {"query": "database migrations", "timeframe": "last_7_days"},
             )
         ],
@@ -146,7 +147,7 @@ async def search_tools_eval() -> EvalSuite:
         user_message="What were my notes from last month about the product roadmap?",
         expected_tool_calls=[
             ExpectedMCPToolCall(
-                "Librarian_Search",
+                "Librarian_SearchLibrary",
                 {"query": "product roadmap", "timeframe": "last_month"},
             )
         ],
@@ -172,7 +173,7 @@ async def search_tools_eval() -> EvalSuite:
         ),
         expected_tool_calls=[
             ExpectedMCPToolCall(
-                "Librarian_FindRelevantContextWithinSpecificDates",
+                "Librarian_SearchLibraryByDates",
                 {
                     "query": "sprint review",
                     "start_date": last_week_start,
@@ -189,10 +190,10 @@ async def search_tools_eval() -> EvalSuite:
 
     suite.add_case(
         name="Search Q4 2025",
-        user_message="Find all documentation I wrote in Q4 2025 about authentication",
+        user_message="Find all documentation I stored in Q4 2025 about authentication",
         expected_tool_calls=[
             ExpectedMCPToolCall(
-                "Librarian_FindRelevantContextWithinSpecificDates",
+                "Librarian_SearchLibraryByDates",
                 {
                     "query": "authentication",
                     "start_date": "2025-10-01",
@@ -213,10 +214,13 @@ async def search_tools_eval() -> EvalSuite:
 
     suite.add_case(
         name="Semantic search request",
-        user_message="Find documents that are conceptually related to containerization and Docker",
+        user_message=(
+            "Find information in my library that is conceptually related to "
+            "containerization and Docker"
+        ),
         expected_tool_calls=[
             ExpectedMCPToolCall(
-                "Librarian_VectorSearch",
+                "Librarian_SemanticSearchLibrary",
                 {"query": "containerization Docker"},
             )
         ],
@@ -227,10 +231,10 @@ async def search_tools_eval() -> EvalSuite:
 
     suite.add_case(
         name="Exact keyword search",
-        user_message="Search for the exact term 'JIRA-1234' in my notes",
+        user_message="Search for the exact term 'JIRA-1234' in my library",
         expected_tool_calls=[
             ExpectedMCPToolCall(
-                "Librarian_KeywordSearch",
+                "Librarian_KeywordSearchLibrary",
                 {"query": "JIRA-1234"},
             )
         ],
@@ -246,11 +250,11 @@ async def search_tools_eval() -> EvalSuite:
 async def document_management_eval() -> EvalSuite:
     """Evaluate document creation, reading, and management tools."""
     suite = EvalSuite(
-        name="Document Management",
+        name="Library Management",
         system_message=(
-            "You are a helpful assistant that manages markdown documents. "
-            "You can create, read, update, and delete documents. "
-            "Always use appropriate filenames with .md extension."
+            "You are a helpful assistant with access to a personal knowledge library. "
+            "You can add, read, update, and remove information from the library. "
+            "Use the library to store and retrieve notes, documents, and any useful information."
         ),
         rubric=EvalRubric(fail_threshold=0.75, warn_threshold=0.85),
     )
@@ -260,63 +264,63 @@ async def document_management_eval() -> EvalSuite:
     )
 
     # ==========================================================================
-    # Document Creation
+    # Adding to Library
     # ==========================================================================
 
     suite.add_case(
-        name="Create simple note",
+        name="Store simple note",
         user_message=(
-            "Create a new note called 'meeting-notes' with the content: "
+            "Save a note called 'meeting-notes' with the content: "
             "'# Team Standup\n\nDiscussed sprint goals.'"
         ),
         expected_tool_calls=[
             ExpectedMCPToolCall(
-                "Librarian_AddDocument",
+                "Librarian_AddToLibrary",
                 {
-                    "filename": "meeting-notes.md",
+                    "title": "meeting-notes",
                     "content": "# Team Standup\n\nDiscussed sprint goals.",
                 },
             )
         ],
         critics=[
-            BinaryCritic(critic_field="filename", weight=0.5),
+            BinaryCritic(critic_field="title", weight=0.5),
             SimilarityCritic(critic_field="content", weight=0.5),
         ],
     )
 
     suite.add_case(
-        name="Create note with metadata",
+        name="Store note with tags",
         user_message=(
-            "Create a document called 'project-plan' with tags 'planning' and 'q1' "
-            "and content about the project timeline"
+            "Add to my library a document called 'project-plan' with tags 'planning' and 'q1' "
+            "about the project timeline"
         ),
         expected_tool_calls=[
             ExpectedMCPToolCall(
-                "Librarian_AddDocument",
+                "Librarian_AddToLibrary",
                 {
-                    "filename": "project-plan.md",
+                    "title": "project-plan",
                     "content": "project timeline",
-                    "metadata": {"tags": ["planning", "q1"]},
+                    "tags": ["planning", "q1"],
                 },
             )
         ],
         critics=[
-            BinaryCritic(critic_field="filename", weight=0.4),
+            BinaryCritic(critic_field="title", weight=0.4),
             SimilarityCritic(critic_field="content", weight=0.3),
-            SimilarityCritic(critic_field="metadata", weight=0.3),
+            SimilarityCritic(critic_field="tags", weight=0.3),
         ],
     )
 
     # ==========================================================================
-    # Document Reading
+    # Reading from Library
     # ==========================================================================
 
     suite.add_case(
         name="Read specific document",
-        user_message="Show me the contents of the file at /documents/readme.md",
+        user_message="Show me the full contents of /documents/readme.md from my library",
         expected_tool_calls=[
             ExpectedMCPToolCall(
-                "Librarian_ReadDocument",
+                "Librarian_ReadFromLibrary",
                 {"path": "/documents/readme.md"},
             )
         ],
@@ -326,11 +330,11 @@ async def document_management_eval() -> EvalSuite:
     )
 
     suite.add_case(
-        name="List all documents",
-        user_message="Show me all my indexed documents",
+        name="List library contents",
+        user_message="Show me everything in my library",
         expected_tool_calls=[
             ExpectedMCPToolCall(
-                "Librarian_ListDocuments",
+                "Librarian_ListLibraryContents",
                 {},
             )
         ],
@@ -338,17 +342,17 @@ async def document_management_eval() -> EvalSuite:
     )
 
     # ==========================================================================
-    # Document Updates
+    # Updating Library Content
     # ==========================================================================
 
     suite.add_case(
         name="Update document content",
         user_message=(
-            "Update the file at /notes/todo.md with new content: '# Updated Todo\n\n- [ ] New task'"
+            "Update the content at /notes/todo.md with: '# Updated Todo\n\n- [ ] New task'"
         ),
         expected_tool_calls=[
             ExpectedMCPToolCall(
-                "Librarian_UpdateDocument",
+                "Librarian_UpdateLibraryDoc",
                 {
                     "path": "/notes/todo.md",
                     "content": "# Updated Todo\n\n- [ ] New task",
@@ -362,17 +366,17 @@ async def document_management_eval() -> EvalSuite:
     )
 
     # ==========================================================================
-    # Document Deletion
+    # Removing from Library
     # ==========================================================================
 
     suite.add_case(
-        name="Delete document from index only",
+        name="Remove from index only",
         user_message=(
-            "Remove the document at /old/archive.md from the search index but keep the file"
+            "Remove /old/archive.md from my library search but keep the file on disk"
         ),
         expected_tool_calls=[
             ExpectedMCPToolCall(
-                "Librarian_DeleteDocument",
+                "Librarian_RemoveFromLibrary",
                 {"path": "/old/archive.md", "delete_file": False},
             )
         ],
@@ -383,11 +387,11 @@ async def document_management_eval() -> EvalSuite:
     )
 
     suite.add_case(
-        name="Delete document completely",
-        user_message="Permanently delete the file /temp/scratch.md",
+        name="Permanently delete",
+        user_message="Permanently delete /temp/scratch.md from my library and disk",
         expected_tool_calls=[
             ExpectedMCPToolCall(
-                "Librarian_DeleteDocument",
+                "Librarian_RemoveFromLibrary",
                 {"path": "/temp/scratch.md", "delete_file": True},
             )
         ],
@@ -404,10 +408,10 @@ async def document_management_eval() -> EvalSuite:
 async def ingestion_eval() -> EvalSuite:
     """Evaluate document ingestion tools."""
     suite = EvalSuite(
-        name="Document Ingestion",
+        name="Library Ingestion",
         system_message=(
-            "You are a helpful assistant that indexes markdown documents for search. "
-            "You can ingest entire directories of markdown files."
+            "You are a helpful assistant with access to a personal knowledge library. "
+            "You can add entire directories of files to the library for indexing and search."
         ),
         rubric=EvalRubric(fail_threshold=0.7, warn_threshold=0.85),
     )
@@ -421,11 +425,11 @@ async def ingestion_eval() -> EvalSuite:
     # ==========================================================================
 
     suite.add_case(
-        name="Ingest default directory",
-        user_message="Index all my documents",
+        name="Index default directory",
+        user_message="Add all my documents to the library",
         expected_tool_calls=[
             ExpectedMCPToolCall(
-                "Librarian_IngestDirectory",
+                "Librarian_IndexDirectoryToLibrary",
                 {"recursive": True},
             )
         ],
@@ -435,11 +439,11 @@ async def ingestion_eval() -> EvalSuite:
     )
 
     suite.add_case(
-        name="Ingest specific directory",
-        user_message="Index all markdown files in /projects/documentation",
+        name="Index specific directory",
+        user_message="Add all files from /projects/documentation to my library",
         expected_tool_calls=[
             ExpectedMCPToolCall(
-                "Librarian_IngestDirectory",
+                "Librarian_IndexDirectoryToLibrary",
                 {"directory": "/projects/documentation", "recursive": True},
             )
         ],
@@ -451,10 +455,10 @@ async def ingestion_eval() -> EvalSuite:
 
     suite.add_case(
         name="Force reindex",
-        user_message="Re-index all documents in /notes, even ones already indexed",
+        user_message="Re-index everything in /notes even if already in my library",
         expected_tool_calls=[
             ExpectedMCPToolCall(
-                "Librarian_IngestDirectory",
+                "Librarian_IndexDirectoryToLibrary",
                 {"directory": "/notes", "force_reindex": True},
             )
         ],
@@ -467,11 +471,11 @@ async def ingestion_eval() -> EvalSuite:
     suite.add_case(
         name="Non-recursive ingestion",
         user_message=(
-            "Index only the top-level markdown files in /archive, don't go into subdirectories"
+            "Add only the top-level files in /archive to my library, not subdirectories"
         ),
         expected_tool_calls=[
             ExpectedMCPToolCall(
-                "Librarian_IngestDirectory",
+                "Librarian_IndexDirectoryToLibrary",
                 {"directory": "/archive", "recursive": False},
             )
         ],
@@ -486,11 +490,11 @@ async def ingestion_eval() -> EvalSuite:
     # ==========================================================================
 
     suite.add_case(
-        name="Get index statistics",
-        user_message="How many documents do I have indexed?",
+        name="Get library statistics",
+        user_message="How many documents do I have in my library?",
         expected_tool_calls=[
             ExpectedMCPToolCall(
-                "Librarian_GetStats",
+                "Librarian_GetLibraryStats",
                 {},
             )
         ],
@@ -504,10 +508,11 @@ async def ingestion_eval() -> EvalSuite:
 async def complex_workflows_eval() -> EvalSuite:
     """Evaluate complex multi-step workflows."""
     suite = EvalSuite(
-        name="Complex Workflows",
+        name="Complex Library Workflows",
         system_message=(
-            "You are a helpful assistant that manages and searches markdown documents. "
-            "You can perform multi-step operations when needed."
+            "You are a helpful assistant with access to a personal knowledge library. "
+            "You can store, search, and manage information in the library. "
+            "Perform multi-step operations when needed to help the user."
         ),
         rubric=EvalRubric(fail_threshold=0.7, warn_threshold=0.85),
     )
@@ -525,7 +530,7 @@ async def complex_workflows_eval() -> EvalSuite:
         user_message="Find my notes about the budget and show me the most relevant one",
         expected_tool_calls=[
             ExpectedMCPToolCall(
-                "Librarian_Search",
+                "Librarian_SearchLibrary",
                 {"query": "budget", "limit": 1},
             ),
         ],
@@ -538,11 +543,11 @@ async def complex_workflows_eval() -> EvalSuite:
     suite.add_case(
         name="Diverse results request",
         user_message=(
-            "Find diverse perspectives on the architecture decision, avoid repetitive results"
+            "Search my library for diverse perspectives on the architecture decision"
         ),
         expected_tool_calls=[
             ExpectedMCPToolCall(
-                "Librarian_Search",
+                "Librarian_SearchLibrary",
                 {"query": "architecture decision", "use_mmr": True},
             )
         ],
@@ -554,13 +559,13 @@ async def complex_workflows_eval() -> EvalSuite:
 
     suite.add_case(
         name="Keyword-heavy search",
-        user_message="I need results that exactly match the keywords, not just similar concepts",
+        user_message="Search my library for exact keyword matches, not similar concepts",
         additional_messages=[
             {"role": "user", "content": "Search for 'kubernetes deployment yaml'"},
         ],
         expected_tool_calls=[
             ExpectedMCPToolCall(
-                "Librarian_Search",
+                "Librarian_SearchLibrary",
                 {"query": "kubernetes deployment yaml", "hybrid_alpha": 0.0},
             )
         ],

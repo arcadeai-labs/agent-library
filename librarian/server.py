@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
 """
-Librarian MCP Server.
+Librarian MCP Server - Agent Knowledge Library.
 
-A markdown document management system for maintaining, indexing,
-ingesting, and retrieving markdown documents through LLM tools.
+A personal knowledge library for AI agents to store, search, and retrieve
+any text, documents, notes, and information. Think of it as an agent's
+personal library that persists across sessions.
 
 Usage:
     uv run librarian/server.py stdio    # For Claude Desktop, CLI tools
@@ -62,22 +63,24 @@ def _process_and_index_file(file_path: Path) -> dict[str, Any]:
 
 
 # =============================================================================
-# Ingestion Tools
+# Library Ingestion Tools
 # =============================================================================
 
 
 @app.tool
-async def ingest_directory(
+async def index_directory_to_library(
     context: Context,
-    directory: Annotated[str, "Path to directory containing markdown files"] = "",
-    recursive: Annotated[bool, "Whether to search subdirectories"] = True,
-    force_reindex: Annotated[bool, "Whether to reindex existing documents"] = False,
+    directory: Annotated[str, "Path to directory containing files to add to the library"] = "",
+    recursive: Annotated[bool, "Whether to include subdirectories"] = True,
+    force_reindex: Annotated[bool, "Whether to re-process already indexed documents"] = False,
 ) -> dict[str, Any]:
     """
-    Ingest markdown files from a directory into the index.
+    Add all documents from a directory to the agent's library.
 
-    Scans the specified directory for markdown files, parses them,
-    generates embeddings, and stores them in the vector database.
+    Use this to bulk-import text files, notes, documentation, or any
+    markdown content into the library for later search and retrieval.
+    The library persists across sessions, so content added here will
+    be available in future conversations.
     """
     dir_path = Path(directory) if directory else Path(DOCUMENTS_PATH)
 
@@ -138,23 +141,34 @@ async def ingest_directory(
 
 
 @app.tool
-async def add_document(
+async def add_to_library(
     context: Context,
-    content: Annotated[str, "The markdown content to add"],
-    filename: Annotated[str, "Filename for the document (without path)"],
-    directory: Annotated[str, "Directory to save the document in"] = "",
-    metadata: Annotated[dict[str, Any] | None, "Optional metadata for the document"] = None,
+    content: Annotated[str, "The text content to store in the library"],
+    title: Annotated[str, "A title or filename for this content (without .md extension)"],
+    directory: Annotated[str, "Directory to save in (optional, uses default library path)"] = "",
+    tags: Annotated[list[str] | None, "Optional tags to categorize this content"] = None,
+    metadata: Annotated[dict[str, Any] | None, "Optional additional metadata"] = None,
 ) -> dict[str, Any]:
     """
-    Add a new markdown document to the index.
+    Store new content in the agent's library.
 
-    Creates a new markdown file with the given content and indexes it
-    for searching.
+    Use this to save any text, notes, information, or knowledge that should
+    be remembered and searchable later. The content is indexed for both
+    semantic (meaning-based) and keyword search, making it easy to find
+    relevant information in future conversations.
+
+    Examples of what to store:
+    - Meeting notes and summaries
+    - Research findings and insights
+    - Code documentation and explanations
+    - Personal notes and reminders
+    - Any information worth remembering
     """
     dir_path = Path(directory) if directory else Path(DOCUMENTS_PATH)
     dir_path.mkdir(parents=True, exist_ok=True)
 
-    # Ensure .md extension
+    # Clean filename and ensure .md extension
+    filename = title.replace("/", "-").replace("\\", "-")
     if not filename.endswith(".md"):
         filename = filename + ".md"
 
@@ -163,15 +177,21 @@ async def add_document(
     # Check if file already exists
     if file_path.exists():
         return {
-            "error": f"File already exists: {file_path}",
+            "error": f"Content with this title already exists: {title}",
             "path": str(file_path),
+            "suggestion": "Use update_library_doc to modify existing content",
         }
 
+    # Build metadata
+    meta = metadata or {}
+    if tags:
+        meta["tags"] = tags
+
     # Add frontmatter if metadata provided
-    if metadata:
+    if meta:
         import yaml
 
-        frontmatter_str = "---\n" + yaml.dump(metadata, default_flow_style=False) + "---\n\n"
+        frontmatter_str = "---\n" + yaml.dump(meta, default_flow_style=False) + "---\n\n"
         content = frontmatter_str + content
 
     # Write the file
@@ -181,7 +201,8 @@ async def add_document(
     try:
         result = _process_and_index_file(file_path)
         return {
-            "status": "success",
+            "status": "stored",
+            "message": f"Content '{title}' has been added to your library",
             "path": str(file_path),
             "title": result["title"],
             "chunks": result["chunks"],
@@ -193,18 +214,21 @@ async def add_document(
 
 
 @app.tool
-async def update_document(
+async def update_library_doc(
     context: Context,
     path: Annotated[str, "Path to the document to update"],
-    content: Annotated[str, "The new markdown content"],
+    content: Annotated[str, "The new content to replace the existing content"],
 ) -> dict[str, Any]:
     """
-    Update an existing document's content and reindex it.
+    Update existing content in the agent's library.
+
+    Use this to modify or replace content that was previously stored.
+    The updated content will be re-indexed for search.
     """
     file_path = Path(path)
 
     if not file_path.exists():
-        return {"error": f"File not found: {path}"}
+        return {"error": f"Document not found in library: {path}"}
 
     # Write new content
     file_path.write_text(content, encoding="utf-8")
@@ -213,7 +237,8 @@ async def update_document(
     try:
         result = _process_and_index_file(file_path)
         return {
-            "status": "success",
+            "status": "updated",
+            "message": "Content has been updated in your library",
             "path": str(file_path),
             "title": result["title"],
             "chunks": result["chunks"],
@@ -223,31 +248,37 @@ async def update_document(
 
 
 # =============================================================================
-# Search Tools
+# Library Search Tools
 # =============================================================================
 
 
 @app.tool
-async def search(
+async def search_library(
     context: Context,
-    query: Annotated[str, "The search query"],
+    query: Annotated[str, "What to search for in the library"],
     limit: Annotated[int, "Maximum number of results to return"] = 10,
-    use_mmr: Annotated[bool, "Use Max Marginal Relevance for diverse results"] = True,
+    use_mmr: Annotated[bool, "Use diverse results (recommended)"] = True,
     hybrid_alpha: Annotated[
-        float, "Weight for vector vs keyword search (0=keyword, 1=vector)"
+        float, "Balance between meaning (1.0) and keywords (0.0)"
     ] = 0.7,
     timeframe: Annotated[
         str | None,
-        "Optional timeframe filter: today, yesterday, this_week, last_week, "
-        "this_month, last_month, last_7_days, last_30_days, last_90_days, "
-        "this_year, last_year",
+        "Filter by time: today, yesterday, this_week, last_week, "
+        "this_month, last_month, last_7_days, last_30_days, this_year",
     ] = None,
 ) -> list[dict[str, Any]]:
     """
-    Search for relevant document chunks using hybrid vector and keyword search.
+    Search the agent's library for relevant information.
 
-    Combines semantic similarity search with full-text keyword search,
-    optionally using MMR for diverse results. Can be filtered by timeframe.
+    This is the primary way to find stored knowledge. It uses both
+    semantic understanding (finding content with similar meaning) and
+    keyword matching to find the most relevant results.
+
+    Use this when you need to:
+    - Find previously stored information
+    - Look up notes or documentation
+    - Recall context from past conversations
+    - Answer questions using stored knowledge
     """
     if not query.strip():
         return []
@@ -288,23 +319,19 @@ async def search(
 
 
 @app.tool
-async def find_relevant_context_within_specific_dates(
+async def search_library_by_dates(
     context: Context,
-    query: Annotated[str, "The search query"],
-    start_date: Annotated[str, "Start date in ISO format (YYYY-MM-DD or YYYY-MM-DDTHH:MM:SS)"],
-    end_date: Annotated[str, "End date in ISO format (YYYY-MM-DD or YYYY-MM-DDTHH:MM:SS)"],
-    limit: Annotated[int, "Maximum number of results to return"] = 10,
-    use_mmr: Annotated[bool, "Use Max Marginal Relevance for diverse results"] = True,
+    query: Annotated[str, "What to search for"],
+    start_date: Annotated[str, "Start date (YYYY-MM-DD)"],
+    end_date: Annotated[str, "End date (YYYY-MM-DD)"],
+    limit: Annotated[int, "Maximum number of results"] = 10,
+    use_mmr: Annotated[bool, "Use diverse results"] = True,
 ) -> list[dict[str, Any]]:
     """
-    Search for relevant context within a specific date range.
+    Search the library for content within a specific date range.
 
-    Use this tool when you need to find documents that were created or updated
-    between specific dates. Dates should be in ISO format.
-
-    Example:
-        start_date: "2025-01-01"
-        end_date: "2025-01-15"
+    Use this when you need to find information that was stored or
+    updated during a particular time period.
     """
     if not query.strip():
         return []
@@ -349,15 +376,19 @@ async def find_relevant_context_within_specific_dates(
 
 
 @app.tool
-async def vector_search(
+async def semantic_search_library(
     context: Context,
-    query: Annotated[str, "The search query"],
+    query: Annotated[str, "What to search for (searches by meaning)"],
     limit: Annotated[int, "Maximum number of results"] = 10,
 ) -> list[dict[str, Any]]:
     """
-    Search using pure vector similarity (semantic search).
+    Search the library using semantic similarity only.
 
-    Uses embeddings to find semantically similar content.
+    This finds content that has similar meaning to your query,
+    even if it doesn't contain the exact words. Best for:
+    - Finding related concepts
+    - Discovering content you might not find with keywords
+    - Understanding and inference-based search
     """
     if not query.strip():
         return []
@@ -379,15 +410,19 @@ async def vector_search(
 
 
 @app.tool
-async def keyword_search(
+async def keyword_search_library(
     context: Context,
-    query: Annotated[str, "The keyword search query"],
+    query: Annotated[str, "Keywords to search for"],
     limit: Annotated[int, "Maximum number of results"] = 10,
 ) -> list[dict[str, Any]]:
     """
-    Search using pure keyword/full-text search.
+    Search the library using exact keyword matching.
 
-    Uses SQLite FTS5 for fast keyword matching with BM25 ranking.
+    This finds content containing the specific words in your query.
+    Best for:
+    - Finding specific terms or phrases
+    - Technical searches where exact wording matters
+    - When you know exactly what you're looking for
     """
     if not query.strip():
         return []
@@ -410,17 +445,20 @@ async def keyword_search(
 
 
 # =============================================================================
-# Document Management Tools
+# Library Management Tools
 # =============================================================================
 
 
 @app.tool
-async def read_document(
+async def read_from_library(
     context: Context,
     path: Annotated[str, "Path to the document to read"],
 ) -> dict[str, Any]:
     """
-    Read the full content of a document.
+    Read the full content of a document from the library.
+
+    Use this after searching to get the complete content of a
+    document, rather than just the matching snippets.
     """
     db = get_database()
     doc = db.get_document_by_path(path)
@@ -434,6 +472,7 @@ async def read_document(
                 "path": path,
                 "content": content,
                 "indexed": False,
+                "note": "This file exists but is not in the library index",
             }
         return {"error": f"Document not found: {path}"}
 
@@ -450,15 +489,16 @@ async def read_document(
 
 
 @app.tool
-async def delete_document(
+async def remove_from_library(
     context: Context,
-    path: Annotated[str, "Path to the document to delete"],
-    delete_file: Annotated[bool, "Also delete the file from disk"] = False,
+    path: Annotated[str, "Path to the document to remove"],
+    delete_file: Annotated[bool, "Also delete the file from disk (permanent)"] = False,
 ) -> dict[str, Any]:
     """
-    Delete a document from the index.
+    Remove a document from the agent's library.
 
-    Optionally also deletes the file from disk.
+    By default, this only removes from the search index (the file
+    remains on disk). Set delete_file=True to permanently delete.
     """
     db = get_database()
 
@@ -468,6 +508,7 @@ async def delete_document(
     result = {
         "path": path,
         "removed_from_index": deleted,
+        "message": "Document removed from library" if deleted else "Document was not in library",
     }
 
     # Optionally delete file
@@ -476,6 +517,7 @@ async def delete_document(
         if file_path.exists():
             file_path.unlink()
             result["file_deleted"] = True
+            result["message"] = "Document permanently deleted"
         else:
             result["file_deleted"] = False
 
@@ -483,12 +525,15 @@ async def delete_document(
 
 
 @app.tool
-async def list_documents(
+async def list_library_contents(
     context: Context,
     limit: Annotated[int, "Maximum number of documents to list"] = 100,
 ) -> list[dict[str, Any]]:
     """
-    List all indexed documents.
+    List all documents stored in the agent's library.
+
+    Returns a summary of each document including title, path,
+    and when it was added/updated.
     """
     db = get_database()
     documents = db.list_documents()[:limit]
@@ -507,12 +552,12 @@ async def list_documents(
 
 
 @app.tool
-async def get_stats(context: Context) -> dict[str, Any]:
+async def get_library_stats(context: Context) -> dict[str, Any]:
     """
-    Get statistics about the index.
+    Get statistics about the agent's library.
 
-    Returns counts of documents, chunks, and embeddings,
-    plus configuration information.
+    Shows how many documents are stored, total chunks indexed,
+    and current configuration settings.
     """
     db = get_database()
     stats = db.get_stats()
