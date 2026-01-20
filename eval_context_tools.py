@@ -12,16 +12,19 @@ Run with:
 
 from datetime import datetime, timedelta
 
+import arcade_evals
 from arcade_evals import (
     BinaryCritic,
     DatetimeCritic,
     EvalRubric,
     EvalSuite,
-    ExpectedMCPToolCall,
     NumericCritic,
     SimilarityCritic,
     tool_eval,
 )
+
+# Use module-qualified name to avoid scoping issues with the decorator
+ExpectedMCPToolCall = arcade_evals.ExpectedMCPToolCall
 
 
 @tool_eval()
