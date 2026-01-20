@@ -1,0 +1,99 @@
+[project]
+name = "librarian"
+version = "0.5.0"
+description = "Markdown document management system with vector and full-text search"
+readme = "README.md"
+license = "MIT"
+requires-python = ">=3.10"
+authors = [
+    { name = "Arcade.dev", email = "dev@arcade.dev" }
+]
+keywords = ["markdown", "search", "vector", "embeddings", "mcp", "ai"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Environment :: Console",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Software Development :: Libraries :: Python Modules",
+    "Topic :: Text Processing :: Indexing",
+]
+dependencies = [
+    "arcade-mcp-server>=0.1.0",
+    "sentence-transformers>=2.2.0",
+    "sqlite-vec>=0.1.0",
+    "pyyaml>=6.0",
+    "python-frontmatter>=1.0.0",
+    "numpy>=1.24.0",
+    "typer[all]>=0.9.0",
+    "rich>=13.0.0",
+]
+
+[project.scripts]
+librarian = "librarian.cli:app"
+libr = "librarian.cli:app"
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.3.0",
+    "pytest-cov>=4.0.0",
+    "pytest-asyncio>=0.25.0",
+    "mypy>=1.5.1",
+    "pre-commit>=3.4.0",
+    "ruff>=0.7.4",
+    "types-pyyaml>=6.0.1",
+]
+evals = [
+    "arcade-mcp[evals]>=1.0.0",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["librarian"]
+
+[tool.mypy]
+files = ["librarian/**/*.py"]
+exclude = ["librarian/cli\\.py$"]  # CLI wraps decorated server functions
+python_version = "3.10"
+disallow_untyped_defs = true
+disallow_any_unimported = true
+no_implicit_optional = true
+check_untyped_defs = true
+warn_return_any = true
+warn_unused_ignores = false
+show_error_codes = true
+ignore_missing_imports = true
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+asyncio_default_fixture_loop_scope = "function"
+asyncio_mode = "auto"
+markers = [
+    "slow: marks tests as slow (loads real embedding model)",
+]
+addopts = "-m 'not slow'"
+
+[tool.coverage.report]
+skip_empty = true
+
+[tool.ruff]
+line-length = 100
+target-version = "py310"
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "UP", "B", "C4", "SIM"]
+ignore = [
+    "E501",  # Line too long (handled by formatter)
+    "C901",  # Function complexity (CLI commands can be complex)
+]
+
+[tool.coverage.run]
+source = ["librarian"]
+omit = ["librarian/__pycache__/*"]
