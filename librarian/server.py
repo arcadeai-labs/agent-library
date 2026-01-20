@@ -552,12 +552,76 @@ async def list_library_contents(
 
 
 @app.tool
+async def get_library_sources(context: Context) -> list[dict[str, Any]]:
+    """
+    List all sources in the agent's library with statistics.
+
+    Shows each registered source (directory or file) along with:
+    - Number of documents indexed from that source
+    - Number of chunks generated
+    - Source path and name
+    - Whether the source is still accessible
+
+    Use this to understand what knowledge is in the library and where it came from.
+    """
+    import json
+    from pathlib import Path
+
+    # Load sources from config file
+    sources_file = Path.home() / ".librarian" / "sources.json"
+    if not sources_file.exists():
+        return []
+
+    try:
+        with open(sources_file) as f:
+            sources = json.load(f)
+    except (json.JSONDecodeError, OSError):
+        return []
+
+    db = get_database()
+    all_documents = db.list_documents()
+
+    result = []
+    for source in sources:
+        source_path = source.get("path", "")
+        source_name = source.get("name", source_path)
+
+        # Count documents from this source
+        docs_from_source = [d for d in all_documents if d.path.startswith(source_path)]
+        doc_count = len(docs_from_source)
+
+        # Count chunks for these documents
+        chunk_count = 0
+        for doc in docs_from_source:
+            if doc.id:
+                chunks = db.get_chunks_by_document(doc.id)
+                chunk_count += len(chunks)
+
+        # Check if source still exists
+        path_obj = Path(source_path)
+        exists = path_obj.exists()
+
+        result.append({
+            "name": source_name,
+            "path": source_path,
+            "type": "file" if source.get("is_file") else "directory",
+            "document_count": doc_count,
+            "chunk_count": chunk_count,
+            "exists": exists,
+            "recursive": source.get("recursive", True),
+            "added_at": source.get("added_at"),
+        })
+
+    return result
+
+
+@app.tool
 async def get_library_stats(context: Context) -> dict[str, Any]:
     """
-    Get statistics about the agent's library.
+    Get overall statistics about the agent's library.
 
-    Shows how many documents are stored, total chunks indexed,
-    and current configuration settings.
+    Shows total documents stored, chunks indexed, and configuration.
+    For per-source statistics, use get_library_sources instead.
     """
     db = get_database()
     stats = db.get_stats()

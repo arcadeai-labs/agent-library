@@ -501,6 +501,18 @@ async def ingestion_eval() -> EvalSuite:
         critics=[],  # No parameters to validate
     )
 
+    suite.add_case(
+        name="Get library sources",
+        user_message="What sources are in my library and how many documents from each?",
+        expected_tool_calls=[
+            ExpectedMCPToolCall(
+                "Librarian_GetLibrarySources",
+                {},
+            )
+        ],
+        critics=[],  # No parameters to validate
+    )
+
     return suite
 
 

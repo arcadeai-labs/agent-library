@@ -312,3 +312,12 @@ class TestDocumentManagementTools:
         assert "document_count" in result
         assert "chunk_count" in result
         assert "config" in result
+
+    @pytest.mark.asyncio
+    async def test_get_library_sources(self, clean_db: Path) -> None:
+        """Test getting library sources."""
+        from librarian.server import get_library_sources
+
+        result = await get_library_sources(context=CTX)
+        # Result should be a list (may be empty if no sources registered)
+        assert isinstance(result, list)

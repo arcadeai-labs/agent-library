@@ -90,7 +90,8 @@ See the [Arcade MCP documentation](https://docs.arcade.dev) for integration deta
 | `Librarian_RemoveFromLibrary` | Remove content from the library |
 | `Librarian_ListLibraryContents` | List all stored content |
 | `Librarian_IndexDirectoryToLibrary` | Bulk import files |
-| `Librarian_GetLibraryStats` | Library statistics |
+| `Librarian_GetLibrarySources` | List sources with document/chunk counts |
+| `Librarian_GetLibraryStats` | Overall library statistics |
 
 ## Configuration
 
@@ -156,5 +157,5 @@ MIT License - see [LICENSE](LICENSE) for details.
 
 ## Contact
 
-- Email: contact@arcade.dev
+- Email: <contact@arcade.dev>
 - Website: [arcade.dev](https://arcade.dev)
