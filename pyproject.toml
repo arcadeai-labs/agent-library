@@ -83,16 +83,7 @@ addopts = "-m 'not slow'"
 [tool.coverage.report]
 skip_empty = true
 
-[tool.ruff]
-line-length = 100
-target-version = "py310"
-
-[tool.ruff.lint]
-select = ["E", "F", "W", "I", "UP", "B", "C4", "SIM"]
-ignore = [
-    "E501",  # Line too long (handled by formatter)
-    "C901",  # Function complexity (CLI commands can be complex)
-]
+# Ruff configuration is in .ruff.toml
 
 [tool.coverage.run]
 source = ["librarian"]

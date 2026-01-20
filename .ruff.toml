@@ -42,6 +42,7 @@ ignore = [
 
 [lint.per-file-ignores]
 "**/tests/*" = ["S101"]
+"librarian/cli.py" = ["S603", "S607"]  # CLI uses controlled subprocess calls
 
 [format]
 preview = true
