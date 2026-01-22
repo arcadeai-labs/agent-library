@@ -38,6 +38,8 @@ ignore = [
     "E501",   # Line too long (handled by formatter)
     "TRY003", # Avoid specifying messages outside exception class
     "PGH003", # Blanket type ignores (we use them for decorated functions)
+    "UP007",  # Use X | Y instead of Union[X, Y] - disabled for typer CLI compatibility
+    "UP045",  # Use X | None instead of Optional[X] - disabled for typer CLI compatibility
 ]
 
 [lint.per-file-ignores]
