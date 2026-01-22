@@ -26,7 +26,7 @@ import sys
 from datetime import datetime
 from enum import Enum
 from pathlib import Path
-from typing import Annotated, Any
+from typing import Annotated, Any, Optional
 
 # Suppress verbose logging BEFORE any librarian imports
 os.environ.setdefault("LOGURU_LEVEL", "ERROR")
@@ -325,17 +325,17 @@ def list_sources(
 def add_source(
     path: Annotated[str, typer.Argument(help="Path to file or directory to add")],
     name: Annotated[
-        str | None, typer.Option("--name", "-n", help="Custom name for the source")
+        Optional[str], typer.Option("--name", "-n", help="Custom name for the source")
     ] = None,
     depth: Annotated[
         int, typer.Option("--depth", "-d", help="Limit recursion depth (0=current dir only)")
     ] = -1,
     pattern: Annotated[
-        str | None,
+        Optional[str],
         typer.Option("--pattern", "-p", help="Glob pattern to include (e.g., 'notes/*.md')"),
     ] = None,
     exclude: Annotated[
-        list[str] | None,
+        Optional[list[str]],
         typer.Option("--exclude", "-e", help="Patterns to exclude (can repeat)"),
     ] = None,
     dry_run: Annotated[
@@ -573,7 +573,7 @@ def index_stats(
 @index_app.command("build")
 def index_build(
     source: Annotated[
-        str | None, typer.Option("--source", "-s", help="Rebuild only this source")
+        Optional[str], typer.Option("--source", "-s", help="Rebuild only this source")
     ] = None,
     confirm: Annotated[bool, typer.Option("--yes", "-y", help="Skip confirmation")] = False,
     verbose: Annotated[bool, typer.Option("--verbose", "-v", help="Show files")] = False,
@@ -790,7 +790,9 @@ def docs_overview(ctx: typer.Context) -> None:
 
 @docs_app.command("list")
 def docs_list(
-    source: Annotated[str | None, typer.Option("--source", "-s", help="Filter by source")] = None,
+    source: Annotated[
+        Optional[str], typer.Option("--source", "-s", help="Filter by source")
+    ] = None,
     limit: Annotated[int, typer.Option("--limit", "-l", help="Max documents")] = 50,
     output_format: Annotated[
         OutputFormat, typer.Option("--format", "-f", help="Output format")
@@ -916,9 +918,11 @@ def search_cmd(
     mode: Annotated[
         SearchMode, typer.Option("--mode", "-m", help="Search mode")
     ] = SearchMode.HYBRID,
-    source: Annotated[str | None, typer.Option("--source", "-s", help="Filter by source")] = None,
+    source: Annotated[
+        Optional[str], typer.Option("--source", "-s", help="Filter by source")
+    ] = None,
     timeframe: Annotated[
-        Timeframe | None, typer.Option("--timeframe", "-t", help="Time filter")
+        Optional[Timeframe], typer.Option("--timeframe", "-t", help="Time filter")
     ] = None,
     output_format: Annotated[
         OutputFormat, typer.Option("--format", "-f", help="Output format")
@@ -947,7 +951,9 @@ def search_cmd(
         elif mode == SearchMode.KEYWORD:
             results = _run_async(keyword_search_library(context=None, query=query, limit=limit))  # type: ignore[arg-type]
         else:
-            results = _run_async(search_library(context=None, query=query, limit=limit, use_mmr=True))  # type: ignore[arg-type]
+            results = _run_async(
+                search_library(context=None, query=query, limit=limit, use_mmr=True)
+            )  # type: ignore[arg-type]
 
     # Filter by source
     if source and results:
