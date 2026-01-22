@@ -64,7 +64,7 @@ jobs:
     needs: build
     environment:
       name: pypi
-      url: https://pypi.org/project/librarian/
+      url: https://pypi.org/project/libr/
     steps:
       - name: Download artifacts
         uses: actions/download-artifact@v4
@@ -107,13 +107,13 @@ jobs:
             ## Installation
 
             ```bash
-            pip install librarian==${{ steps.get_version.outputs.VERSION }}
+            pip install libr==${{ steps.get_version.outputs.VERSION }}
             ```
 
             Or from source:
 
             ```bash
-            pip install git+https://github.com/ArcadeAI/librarian.git@v${{ steps.get_version.outputs.VERSION }}
+            pip install git+https://github.com/arcadeai-labs/librarian.git@v${{ steps.get_version.outputs.VERSION }}
             ```
           files: |
             dist/*

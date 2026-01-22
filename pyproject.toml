@@ -1,6 +1,6 @@
 [project]
-name = "librarian"
-version = "0.5.0"
+name = "libr"
+version = "0.6.0"
 description = "Markdown document management system with vector and full-text search"
 readme = "README.md"
 license = "MIT"
