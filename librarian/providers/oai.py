@@ -46,13 +46,13 @@ class OpenAIClient(BaseLLMClient):
         self._api_key = api_key or os.getenv("OPENAI_API_KEY", "")
         self._model = model or DEFAULT_MODEL
         self._default_max_tokens = default_max_tokens or DEFAULT_MAX_TOKENS
-        self._client: AsyncOpenAI | None = None
+        self._client: AsyncOpenAI | None = None  # type: ignore[no-any-unimported]
 
         if not self._api_key:
             logger.warning("OPENAI_API_KEY not set - OpenAI client will fail")
 
     @property
-    def client(self) -> "AsyncOpenAI":
+    def client(self) -> "AsyncOpenAI":  # type: ignore[no-any-unimported]
         """Lazily initialize the async client."""
         if self._client is None:
             try:
