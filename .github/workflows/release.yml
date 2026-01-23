@@ -64,7 +64,7 @@ jobs:
     needs: build
     environment:
       name: pypi
-      url: https://pypi.org/project/libr/
+      url: https://pypi.org/project/agent-library/
     steps:
       - name: Download artifacts
         uses: actions/download-artifact@v4
@@ -107,7 +107,7 @@ jobs:
             ## Installation
 
             ```bash
-            pip install libr==${{ steps.get_version.outputs.VERSION }}
+            pip install agent-library==${{ steps.get_version.outputs.VERSION }}
             ```
 
             Or from source:

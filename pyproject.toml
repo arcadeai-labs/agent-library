@@ -1,6 +1,6 @@
 [project]
-name = "libr"
-version = "0.6.0"
+name = "agent-library"
+version = "0.7.0"
 description = "Markdown document management system with vector and full-text search"
 readme = "README.md"
 license = "MIT"
