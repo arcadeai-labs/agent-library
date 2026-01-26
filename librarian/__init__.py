@@ -36,7 +36,7 @@ from librarian.config import (
     SEARCH_LIMIT,
 )
 
-__version__ = "0.6.0"
+__version__ = "0.8.0"
 
 __all__ = [
     "CHUNK_OVERLAP",
