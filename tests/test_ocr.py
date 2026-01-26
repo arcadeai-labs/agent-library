@@ -13,7 +13,10 @@ class TestOCRFunctionality:
 
     def test_image_parser_without_ocr(self) -> None:
         """Test image parsing with OCR disabled."""
-        parser = ImageParser(enable_ocr=False)
+        try:
+            parser = ImageParser(enable_ocr=False)
+        except ImportError:
+            pytest.skip("PIL not installed")
         test_file = Path(__file__).parent / "data" / "ocr_test_screenshot.png"
 
         if not test_file.exists():
@@ -33,10 +36,11 @@ class TestOCRFunctionality:
 
             # Check if tesseract is available
             pytesseract.get_tesseract_version()
+            parser = ImageParser(enable_ocr=True)
+        except ImportError:
+            pytest.skip("PIL or pytesseract not installed")
         except Exception:
             pytest.skip("Tesseract not installed or not in PATH")
-
-        parser = ImageParser(enable_ocr=True)
         test_file = Path(__file__).parent / "data" / "ocr_test_screenshot.png"
 
         if not test_file.exists():

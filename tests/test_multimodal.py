@@ -181,10 +181,10 @@ class TestPDFParser:
         """Test parsing a real PDF file."""
         try:
             from librarian.processing.parsers.pdf import PDFParser
+
+            parser = PDFParser()
         except ImportError:
             pytest.skip("PDF dependencies not installed")
-
-        parser = PDFParser()
         test_file = Path(__file__).parent / "data" / "test.pdf"
 
         if not test_file.exists():
@@ -220,10 +220,10 @@ class TestImageParser:
         """Test parsing a real image file."""
         try:
             from librarian.processing.parsers.image import ImageParser
+
+            parser = ImageParser()
         except ImportError:
             pytest.skip("PIL not installed")
-
-        parser = ImageParser()
         test_file = Path(__file__).parent / "data" / "test_diagram.png"
 
         if not test_file.exists():
@@ -263,9 +263,15 @@ class TestMultiModalSearch:
         if code_file.exists():
             service.index_file(code_file)
         if pdf_file.exists():
-            service.index_file(pdf_file)
+            try:
+                service.index_file(pdf_file)
+            except ImportError:
+                pass  # PDF dependencies not installed
         if image_file.exists():
-            service.index_file(image_file)
+            try:
+                service.index_file(image_file)
+            except ImportError:
+                pass  # PIL not installed
 
         # Search and verify asset types
         results = search.search("calculator", limit=10)
