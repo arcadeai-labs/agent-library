@@ -14,7 +14,7 @@ import frontmatter
 import yaml
 
 from librarian.processing.parsers.base import BaseParser
-from librarian.types import ParsedDocument, Section
+from librarian.types import AssetType, ParsedDocument, Section
 
 logger = logging.getLogger(__name__)
 
@@ -85,6 +85,7 @@ class MarkdownParser(BaseParser):
             metadata=metadata,
             sections=sections,
             raw_content=content,
+            asset_type=AssetType.TEXT,
         )
 
     def _extract_frontmatter(self, content: str) -> tuple[dict[str, Any], str]:

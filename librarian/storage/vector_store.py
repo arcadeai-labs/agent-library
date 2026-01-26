@@ -27,6 +27,7 @@ class VectorSearchResult:
     document_id: int
     document_path: str
     heading_path: str | None
+    asset_type: str
 
 
 class VectorStore:
@@ -84,7 +85,8 @@ class VectorStore:
                     c.content,
                     c.document_id,
                     c.heading_path,
-                    d.path as document_path
+                    d.path as document_path,
+                    d.asset_type
                 FROM chunk_embeddings ce
                 JOIN chunks c ON ce.chunk_id = c.id
                 JOIN documents d ON c.document_id = d.id
@@ -108,6 +110,7 @@ class VectorStore:
                             document_id=row["document_id"],
                             document_path=row["document_path"],
                             heading_path=row["heading_path"],
+                            asset_type=row["asset_type"],
                         )
                     )
                     if len(results) >= limit:

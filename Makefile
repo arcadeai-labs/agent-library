@@ -35,11 +35,11 @@ clean: clean-build ## Clean all generated files
 
 .PHONY: test
 test: ## Run tests with pytest
-	@uv run pytest -W ignore -v --cov --cov-config=pyproject.toml --cov-report=xml
+	@uv run pytest -v --cov --cov-config=pyproject.toml --cov-report=xml
 
 .PHONY: test-fast
 test-fast: ## Run tests without coverage
-	@uv run pytest -W ignore -v
+	@uv run pytest -v
 
 .PHONY: coverage
 coverage: ## Generate coverage report

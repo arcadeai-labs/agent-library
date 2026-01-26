@@ -61,7 +61,7 @@ command_exists() {
 }
 
 echo -e "${BLUE}╔═══════════════════════════════════════════════════════════════╗${NC}"
-echo -e "${BLUE}║       Librarian - Markdown Document Management System         ║${NC}"
+echo -e "${BLUE}║            Librarian - Context Management Service              ║${NC}"
 echo -e "${BLUE}╚═══════════════════════════════════════════════════════════════╝${NC}"
 echo ""
 

@@ -18,13 +18,14 @@ from arcade_evals import (
     DatetimeCritic,
     EvalRubric,
     EvalSuite,
+    ExpectedToolCall,
     NumericCritic,
     SimilarityCritic,
     tool_eval,
 )
 
-# Use module-qualified name to avoid scoping issues with the decorator
-ExpectedMCPToolCall = arcade_evals.ExpectedMCPToolCall
+# Use ExpectedToolCall instead of ExpectedMCPToolCall (API change)
+ExpectedMCPToolCall = ExpectedToolCall
 
 
 @tool_eval()
@@ -584,6 +585,103 @@ async def complex_workflows_eval() -> EvalSuite:
         critics=[
             SimilarityCritic(critic_field="query", weight=0.6),
             NumericCritic(critic_field="hybrid_alpha", value_range=(0.0, 0.3), weight=0.4),
+        ],
+    )
+
+    return suite
+
+
+@tool_eval()
+async def multimodal_eval() -> EvalSuite:
+    """Evaluate multi-modal asset type handling."""
+    suite = EvalSuite(
+        name="Multi-Modal Library Support",
+        system_message=(
+            "You are a helpful assistant with access to a personal knowledge library. "
+            "The library supports multiple asset types: text, code, PDFs, and images. "
+            "Search results include asset_type to distinguish file types."
+        ),
+        rubric=EvalRubric(fail_threshold=0.7, warn_threshold=0.85),
+    )
+
+    await suite.add_mcp_stdio_server(
+        command=["uv", "run", "librarian/server.py", "stdio"],
+    )
+
+    # ==========================================================================
+    # Multi-Modal Search
+    # ==========================================================================
+
+    suite.add_case(
+        name="Search returns asset_type",
+        user_message="Search my library for calculator",
+        expected_tool_calls=[
+            ExpectedMCPToolCall(
+                "Librarian_SearchLibrary",
+                {"query": "calculator"},
+            )
+        ],
+        critics=[
+            SimilarityCritic(critic_field="query", weight=1.0),
+        ],
+        # Note: Critics don't validate response structure, but the tool
+        # should return asset_type field in results
+    )
+
+    suite.add_case(
+        name="Semantic search returns asset_type",
+        user_message="Find conceptually similar content about data structures",
+        expected_tool_calls=[
+            ExpectedMCPToolCall(
+                "Librarian_SemanticSearchLibrary",
+                {"query": "data structures"},
+            )
+        ],
+        critics=[
+            SimilarityCritic(critic_field="query", weight=1.0),
+        ],
+    )
+
+    suite.add_case(
+        name="Keyword search returns asset_type",
+        user_message="Search for the exact keyword 'Calculator' in my library",
+        expected_tool_calls=[
+            ExpectedMCPToolCall(
+                "Librarian_KeywordSearchLibrary",
+                {"query": "Calculator"},
+            )
+        ],
+        critics=[
+            BinaryCritic(critic_field="query", weight=1.0),
+        ],
+    )
+
+    suite.add_case(
+        name="Index code directory",
+        user_message="Add all files from /projects/api-server to my library",
+        expected_tool_calls=[
+            ExpectedMCPToolCall(
+                "Librarian_IndexDirectoryToLibrary",
+                {"directory": "/projects/api-server", "recursive": True},
+            )
+        ],
+        critics=[
+            BinaryCritic(critic_field="directory", weight=0.6),
+            BinaryCritic(critic_field="recursive", weight=0.4),
+        ],
+    )
+
+    suite.add_case(
+        name="Search with code-specific query",
+        user_message="Find authentication functions in my code",
+        expected_tool_calls=[
+            ExpectedMCPToolCall(
+                "Librarian_SearchLibrary",
+                {"query": "authentication functions"},
+            )
+        ],
+        critics=[
+            SimilarityCritic(critic_field="query", weight=1.0),
         ],
     )
 
