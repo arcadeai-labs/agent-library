@@ -24,7 +24,8 @@ from librarian.config import (
     OPENAI_EMBEDDING_DIMENSION,
     ensure_directories,
 )
-from librarian.types import Chunk, Document
+from librarian.storage.migrations import run_migrations
+from librarian.types import AssetType, Chunk, Document, EmbeddingModality
 
 logger = logging.getLogger(__name__)
 
@@ -132,9 +133,51 @@ class Database:
         else:
             conn.commit()
 
+    def _get_vector_dimension(self, conn: sqlite3.Connection) -> int | None:
+        """
+        Get the dimension of the existing vector table.
+
+        Returns:
+            Dimension of the vector table, or None if table doesn't exist.
+        """
+        try:
+            # Check if table exists
+            cursor = conn.execute(
+                "SELECT name FROM sqlite_master WHERE type='table' AND name='chunk_embeddings'"
+            )
+            if not cursor.fetchone():
+                return None
+
+            # Get table schema to extract dimension
+            cursor = conn.execute("SELECT sql FROM sqlite_master WHERE name='chunk_embeddings'")
+            schema = cursor.fetchone()
+            if schema:
+                sql = schema[0]
+                # Parse: embedding float[1024]
+                import re
+
+                match = re.search(r"float\[(\d+)\]", sql)
+                if match:
+                    return int(match.group(1))
+        except Exception as e:
+            logger.warning(f"Failed to get vector dimension: {e}")
+        return None
+
     def _init_schema(self) -> None:
         """Initialize the database schema."""
         with self.connection() as conn:
+            # Check for dimension mismatch before creating tables
+            existing_dim = self._get_vector_dimension(conn)
+            expected_dim = get_effective_embedding_dimension()
+
+            if existing_dim is not None and existing_dim != expected_dim:
+                error_msg = (
+                    f"Database dimension mismatch: expected {expected_dim} ({EMBEDDING_PROVIDER}), "
+                    f"but database has {existing_dim}. Remove or rename ~/.librarian/index.db to fix."
+                )
+                logger.error(error_msg)
+                raise ValueError(error_msg)
+
             # Create documents table
             conn.execute("""
                 CREATE TABLE IF NOT EXISTS documents (
@@ -214,6 +257,9 @@ class Database:
                 END
             """)
 
+            # Run migrations to add multi-modal support
+            run_migrations(conn)
+
             logger.info("Database schema initialized at %s", self.db_path)
 
     # =========================================================================
@@ -233,8 +279,8 @@ class Database:
         with self._lock, self.connection() as conn:
             cursor = conn.execute(
                 """
-                INSERT INTO documents (path, title, content, metadata, file_mtime)
-                VALUES (?, ?, ?, ?, ?)
+                INSERT INTO documents (path, title, content, metadata, file_mtime, asset_type)
+                VALUES (?, ?, ?, ?, ?, ?)
                 """,
                 (
                     document.path,
@@ -242,6 +288,7 @@ class Database:
                     document.content,
                     json.dumps(document.metadata) if document.metadata else None,
                     document.file_mtime,
+                    document.asset_type.value,
                 ),
             )
             return cursor.lastrowid  # type: ignore[return-value]
@@ -258,7 +305,7 @@ class Database:
                 """
                 UPDATE documents
                 SET path = ?, title = ?, content = ?, metadata = ?,
-                    file_mtime = ?, updated_at = CURRENT_TIMESTAMP
+                    file_mtime = ?, asset_type = ?, updated_at = CURRENT_TIMESTAMP
                 WHERE id = ?
                 """,
                 (
@@ -267,6 +314,7 @@ class Database:
                     document.content,
                     json.dumps(document.metadata) if document.metadata else None,
                     document.file_mtime,
+                    document.asset_type.value,
                     document.id,
                 ),
             )
@@ -284,12 +332,14 @@ class Database:
         with self.connection() as conn:
             row = conn.execute("SELECT * FROM documents WHERE path = ?", (path,)).fetchone()
             if row:
+                asset_type = AssetType(row["asset_type"]) if row["asset_type"] else AssetType.TEXT
                 return Document(
                     id=row["id"],
                     path=row["path"],
                     title=row["title"],
                     content=row["content"],
                     metadata=json.loads(row["metadata"]) if row["metadata"] else {},
+                    asset_type=asset_type,
                     created_at=row["created_at"],
                     updated_at=row["updated_at"],
                     file_mtime=row["file_mtime"],
@@ -309,12 +359,14 @@ class Database:
         with self.connection() as conn:
             row = conn.execute("SELECT * FROM documents WHERE id = ?", (doc_id,)).fetchone()
             if row:
+                asset_type = AssetType(row["asset_type"]) if row["asset_type"] else AssetType.TEXT
                 return Document(
                     id=row["id"],
                     path=row["path"],
                     title=row["title"],
                     content=row["content"],
                     metadata=json.loads(row["metadata"]) if row["metadata"] else {},
+                    asset_type=asset_type,
                     created_at=row["created_at"],
                     updated_at=row["updated_at"],
                     file_mtime=row["file_mtime"],
@@ -329,14 +381,15 @@ class Database:
             doc_id: The document ID to delete.
         """
         with self._lock, self.connection() as conn:
-            # Delete embeddings first
-            conn.execute(
-                """
-                DELETE FROM chunk_embeddings
-                WHERE chunk_id IN (SELECT id FROM chunks WHERE document_id = ?)
-                """,
-                (doc_id,),
-            )
+            # Delete embeddings from all modality tables
+            for table in ["chunk_embeddings", "vec_chunks_code", "vec_chunks_vision"]:
+                conn.execute(
+                    f"""
+                    DELETE FROM {table}
+                    WHERE chunk_id IN (SELECT id FROM chunks WHERE document_id = ?)
+                    """,  # noqa: S608
+                    (doc_id,),
+                )
             # Chunks and FTS entries are deleted via CASCADE and triggers
             conn.execute("DELETE FROM documents WHERE id = ?", (doc_id,))
 
@@ -409,6 +462,9 @@ class Database:
                     title=row["title"],
                     content=row["content"],
                     metadata=json.loads(row["metadata"]) if row["metadata"] else {},
+                    asset_type=AssetType(row["asset_type"])
+                    if row["asset_type"]
+                    else AssetType.TEXT,
                     created_at=row["created_at"],
                     updated_at=row["updated_at"],
                     file_mtime=row["file_mtime"],
@@ -459,8 +515,9 @@ class Database:
             cursor = conn.execute(
                 """
                 INSERT INTO chunks
-                (document_id, content, heading_path, chunk_index, start_char, end_char)
-                VALUES (?, ?, ?, ?, ?, ?)
+                (document_id, content, heading_path, chunk_index, start_char, end_char,
+                 asset_type, modality)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     chunk.document_id,
@@ -469,14 +526,23 @@ class Database:
                     chunk.chunk_index,
                     chunk.start_char,
                     chunk.end_char,
+                    chunk.asset_type.value,
+                    chunk.modality.value,
                 ),
             )
             chunk_id = cursor.lastrowid
 
-            # Insert embedding if provided
+            # Insert embedding if provided, into the appropriate modality-specific table
             if chunk.embedding:
+                if chunk.modality == EmbeddingModality.CODE:
+                    table = "vec_chunks_code"
+                elif chunk.modality == EmbeddingModality.VISION:
+                    table = "vec_chunks_vision"
+                else:
+                    table = "chunk_embeddings"
+
                 conn.execute(
-                    "INSERT INTO chunk_embeddings (chunk_id, embedding) VALUES (?, ?)",
+                    f"INSERT INTO {table} (chunk_id, embedding) VALUES (?, ?)",  # noqa: S608
                     (chunk_id, serialize_embedding(chunk.embedding)),
                 )
 
@@ -498,8 +564,9 @@ class Database:
                 cursor = conn.execute(
                     """
                     INSERT INTO chunks
-                    (document_id, content, heading_path, chunk_index, start_char, end_char)
-                    VALUES (?, ?, ?, ?, ?, ?)
+                    (document_id, content, heading_path, chunk_index, start_char, end_char,
+                     asset_type, modality)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                     (
                         chunk.document_id,
@@ -508,6 +575,8 @@ class Database:
                         chunk.chunk_index,
                         chunk.start_char,
                         chunk.end_char,
+                        chunk.asset_type.value,
+                        chunk.modality.value,
                     ),
                 )
                 chunk_id = cursor.lastrowid
@@ -515,8 +584,15 @@ class Database:
                     chunk_ids.append(chunk_id)
 
                 if chunk.embedding:
+                    if chunk.modality == EmbeddingModality.CODE:
+                        table = "vec_chunks_code"
+                    elif chunk.modality == EmbeddingModality.VISION:
+                        table = "vec_chunks_vision"
+                    else:
+                        table = "chunk_embeddings"
+
                     conn.execute(
-                        "INSERT INTO chunk_embeddings (chunk_id, embedding) VALUES (?, ?)",
+                        f"INSERT INTO {table} (chunk_id, embedding) VALUES (?, ?)",  # noqa: S608
                         (chunk_id, serialize_embedding(chunk.embedding)),
                     )
 
@@ -535,29 +611,49 @@ class Database:
         with self.connection() as conn:
             rows = conn.execute(
                 """
-                SELECT c.*, ce.embedding
+                SELECT c.*, ce.embedding as text_emb, cc.embedding as code_emb, cv.embedding as vision_emb
                 FROM chunks c
                 LEFT JOIN chunk_embeddings ce ON c.id = ce.chunk_id
+                LEFT JOIN vec_chunks_code cc ON c.id = cc.chunk_id
+                LEFT JOIN vec_chunks_vision cv ON c.id = cv.chunk_id
                 WHERE c.document_id = ?
                 ORDER BY c.chunk_index
                 """,
                 (doc_id,),
             ).fetchall()
-            return [
-                Chunk(
-                    id=row["id"],
-                    document_id=row["document_id"],
-                    content=row["content"],
-                    heading_path=row["heading_path"],
-                    chunk_index=row["chunk_index"],
-                    start_char=row["start_char"],
-                    end_char=row["end_char"],
-                    embedding=(
-                        deserialize_embedding(row["embedding"]) if row["embedding"] else None
-                    ),
+            chunks = []
+            for row in rows:
+                asset_type = AssetType(row["asset_type"]) if row["asset_type"] else AssetType.TEXT
+                modality = (
+                    EmbeddingModality(row["modality"])
+                    if row["modality"]
+                    else EmbeddingModality.TEXT
                 )
-                for row in rows
-            ]
+
+                # Get embedding from appropriate table
+                embedding = None
+                if row["text_emb"]:
+                    embedding = deserialize_embedding(row["text_emb"])
+                elif row["code_emb"]:
+                    embedding = deserialize_embedding(row["code_emb"])
+                elif row["vision_emb"]:
+                    embedding = deserialize_embedding(row["vision_emb"])
+
+                chunks.append(
+                    Chunk(
+                        id=row["id"],
+                        document_id=row["document_id"],
+                        content=row["content"],
+                        heading_path=row["heading_path"],
+                        chunk_index=row["chunk_index"],
+                        start_char=row["start_char"],
+                        end_char=row["end_char"],
+                        embedding=embedding,
+                        asset_type=asset_type,
+                        modality=modality,
+                    )
+                )
+            return chunks
 
     def delete_chunks_by_document(self, doc_id: int) -> None:
         """
@@ -567,13 +663,15 @@ class Database:
             doc_id: The document ID.
         """
         with self._lock, self.connection() as conn:
-            conn.execute(
-                """
-                DELETE FROM chunk_embeddings
-                WHERE chunk_id IN (SELECT id FROM chunks WHERE document_id = ?)
-                """,
-                (doc_id,),
-            )
+            # Delete from all embedding tables
+            for table in ["chunk_embeddings", "vec_chunks_code", "vec_chunks_vision"]:
+                conn.execute(
+                    f"""
+                    DELETE FROM {table}
+                    WHERE chunk_id IN (SELECT id FROM chunks WHERE document_id = ?)
+                    """,  # noqa: S608
+                    (doc_id,),
+                )
             conn.execute("DELETE FROM chunks WHERE document_id = ?", (doc_id,))
 
     # =========================================================================
