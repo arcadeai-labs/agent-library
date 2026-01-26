@@ -1,5 +1,6 @@
 """Integration tests for multi-modal parsing and indexing."""
 
+import contextlib
 from pathlib import Path
 
 import pytest
@@ -263,15 +264,11 @@ class TestMultiModalSearch:
         if code_file.exists():
             service.index_file(code_file)
         if pdf_file.exists():
-            try:
+            with contextlib.suppress(ImportError):
                 service.index_file(pdf_file)
-            except ImportError:
-                pass  # PDF dependencies not installed
         if image_file.exists():
-            try:
+            with contextlib.suppress(ImportError):
                 service.index_file(image_file)
-            except ImportError:
-                pass  # PIL not installed
 
         # Search and verify asset types
         results = search.search("calculator", limit=10)
