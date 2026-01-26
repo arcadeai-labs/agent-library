@@ -15,7 +15,7 @@ from librarian.config import HYBRID_ALPHA, MMR_LAMBDA, SEARCH_LIMIT
 from librarian.storage.database import get_database
 from librarian.storage.fts_store import FTSStore
 from librarian.storage.vector_store import VectorStore
-from librarian.types import SearchResult
+from librarian.types import AssetType, SearchResult
 
 if TYPE_CHECKING:
     from librarian.processing.embed import Embedder
@@ -146,6 +146,7 @@ class HybridSearcher:
                 heading_path=r.heading_path,
                 score=1.0 - r.distance,  # Convert distance to similarity
                 vector_score=1.0 - r.distance,
+                asset_type=AssetType(r.asset_type),
             )
             for r in results
         ]
@@ -173,6 +174,7 @@ class HybridSearcher:
                 score=1.0 - (abs(r.rank) / max_rank),  # Normalize to 0-1
                 fts_score=1.0 - (abs(r.rank) / max_rank),
                 snippet=r.snippet,
+                asset_type=AssetType(r.asset_type) if r.asset_type else AssetType.TEXT,
             )
             for r in results
         ]
@@ -206,6 +208,7 @@ class HybridSearcher:
                 score=0.0,
                 vector_score=r.vector_score,
                 fts_score=None,
+                asset_type=r.asset_type,
             )
 
         # Add/merge FTS results
@@ -224,6 +227,7 @@ class HybridSearcher:
                     vector_score=None,
                     fts_score=r.fts_score,
                     snippet=r.snippet,
+                    asset_type=r.asset_type,
                 )
 
         # Calculate combined scores

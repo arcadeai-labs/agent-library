@@ -26,6 +26,7 @@ class FTSSearchResult:
     document_path: str
     heading_path: str | None
     snippet: str | None = None
+    asset_type: str | None = None
 
 
 class FTSStore:
@@ -78,6 +79,7 @@ class FTSStore:
                     c.document_id,
                     c.heading_path,
                     d.path as document_path,
+                    d.asset_type,
                     snippet(chunks_fts, 0, '<mark>', '</mark>', '...', ?) as snippet
                 FROM chunks_fts
                 JOIN chunks c ON chunks_fts.rowid = c.id
@@ -98,6 +100,7 @@ class FTSStore:
                     document_path=row["document_path"],
                     heading_path=row["heading_path"],
                     snippet=row["snippet"],
+                    asset_type=row["asset_type"],
                 )
                 for row in rows
             ]
@@ -133,7 +136,8 @@ class FTSStore:
                     c.content,
                     c.document_id,
                     c.heading_path,
-                    d.path as document_path
+                    d.path as document_path,
+                    d.asset_type
                 FROM chunks_fts
                 JOIN chunks c ON chunks_fts.rowid = c.id
                 JOIN documents d ON c.document_id = d.id
@@ -153,6 +157,7 @@ class FTSStore:
                     document_id=row["document_id"],
                     document_path=row["document_path"],
                     heading_path=row["heading_path"],
+                    asset_type=row["asset_type"],
                 )
                 for row in rows
             ]
