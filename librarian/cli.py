@@ -268,10 +268,7 @@ def _should_skip_file(file_path: Path, supported_extensions: set[str]) -> bool:
         return True
 
     # Skip if extension not in supported list
-    if file_path.suffix.lower() not in supported_extensions:
-        return True
-
-    return False
+    return file_path.suffix.lower() not in supported_extensions
 
 
 def _find_source(name_or_path: str) -> dict | None:
@@ -514,7 +511,9 @@ def add_source(
                 files_to_index.extend(source_path.rglob(f"*{ext}"))
 
         # Filter out system/binary files
-        files_to_index = [f for f in files_to_index if not _should_skip_file(f, supported_extensions)]
+        files_to_index = [
+            f for f in files_to_index if not _should_skip_file(f, supported_extensions)
+        ]
 
         # Apply pattern filter
         if pattern:
@@ -540,7 +539,9 @@ def add_source(
     existing_names = [s.get("name") for s in sources if s.get("name") == source_name]
     if existing_names:
         rprint(f"[yellow]Warning:[/yellow] A source named '{source_name}' already exists.")
-        rprint("  This will create duplicate names. Consider using --name to specify a unique name:")
+        rprint(
+            "  This will create duplicate names. Consider using --name to specify a unique name:"
+        )
         rprint(f"  [cyan]libr add {path} --name {source_name}-2[/cyan]")
         rprint()
         if not typer.confirm("Continue anyway?", default=False):
@@ -623,7 +624,8 @@ def remove_source(
     name: Annotated[str, typer.Argument(help="Name or path of the source to remove")],
     force: Annotated[bool, typer.Option("--force", "-f", help="Skip confirmation")] = False,
     path: Annotated[
-        Optional[str], typer.Option("--path", help="Specify path if multiple sources share the same name")
+        Optional[str],
+        typer.Option("--path", help="Specify path if multiple sources share the same name"),
     ] = None,
 ) -> None:
     """Remove a source and its documents from the index."""

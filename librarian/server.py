@@ -154,10 +154,7 @@ def _should_skip_file(file_path: Path, supported_extensions: set[str]) -> bool:
         return True
 
     # Skip if extension not in supported list
-    if file_path.suffix.lower() not in supported_extensions:
-        return True
-
-    return False
+    return file_path.suffix.lower() not in supported_extensions
 
 
 # =============================================================================
@@ -194,7 +191,7 @@ async def index_directory_to_library(
     registry = get_registry()
     supported_extensions = registry.get_supported_extensions()
 
-    all_files = []
+    all_files: list[Path] = []
     for ext in supported_extensions:
         pattern = f"**/*{ext}" if recursive else f"*{ext}"
         all_files.extend(dir_path.glob(pattern))

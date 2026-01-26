@@ -128,8 +128,9 @@ class ParserRegistry:
                 import os
 
                 from librarian.config import safe_bool
+
                 enable_ocr = safe_bool(os.getenv("ENABLE_OCR"), False)
-                return parser_class(enable_ocr=enable_ocr), asset_type
+                return parser_class(enable_ocr=enable_ocr), asset_type  # type: ignore[call-arg]
 
             return parser_class(), asset_type
 

@@ -18,13 +18,14 @@ from arcade_evals import (
     DatetimeCritic,
     EvalRubric,
     EvalSuite,
+    ExpectedToolCall,
     NumericCritic,
     SimilarityCritic,
     tool_eval,
 )
 
-# Use module-qualified name to avoid scoping issues with the decorator
-ExpectedMCPToolCall = arcade_evals.ExpectedMCPToolCall
+# Use ExpectedToolCall instead of ExpectedMCPToolCall (API change)
+ExpectedMCPToolCall = ExpectedToolCall
 
 
 @tool_eval()

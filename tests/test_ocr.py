@@ -1,4 +1,5 @@
 """Tests for OCR functionality in ImageParser."""
+
 from pathlib import Path
 
 import pytest
@@ -114,10 +115,14 @@ class TestOCRIntegration:
         db = get_database()
         doc = db.get_document_by_path(str(test_file))
         assert doc is not None
-        assert "TODO" in doc.content or "authentication" in doc.content, "OCR text should be in document content"
+        assert "TODO" in doc.content or "authentication" in doc.content, (
+            "OCR text should be in document content"
+        )
 
         # Verify chunks contain OCR text
         chunks = db.get_chunks_by_document(doc.id)
         assert len(chunks) > 0
         chunk_text = " ".join([c.content for c in chunks])
-        assert "TODO" in chunk_text or "authentication" in chunk_text, "OCR text should be in chunks"
+        assert "TODO" in chunk_text or "authentication" in chunk_text, (
+            "OCR text should be in chunks"
+        )

@@ -52,8 +52,7 @@ class ImageParser(BaseParser):
 
         if self.enable_ocr and not PYTESSERACT_AVAILABLE:
             logger.warning(
-                "OCR enabled but pytesseract not installed. "
-                "Install with: pip install pytesseract"
+                "OCR enabled but pytesseract not installed. Install with: pip install pytesseract"
             )
             self.enable_ocr = False
 
@@ -242,7 +241,7 @@ class ImageParser(BaseParser):
                 config = f"-l {OCR_LANGUAGE} {config}"
 
             # Extract text
-            text = pytesseract.image_to_string(img, config=config)
+            text: str = str(pytesseract.image_to_string(img, config=config))
 
             # Clean up text
             text = text.strip()
@@ -250,16 +249,18 @@ class ImageParser(BaseParser):
             # Filter by confidence if needed
             if OCR_MIN_CONFIDENCE > 0:
                 # Get detailed data with confidence scores
-                data = pytesseract.image_to_data(img, config=config, output_type=pytesseract.Output.DICT)  # type: ignore[attr-defined]
+                data = pytesseract.image_to_data(
+                    img, config=config, output_type=pytesseract.Output.DICT
+                )  # type: ignore[attr-defined]
                 filtered_text_parts = []
 
                 for i, conf in enumerate(data["conf"]):  # type: ignore[index]
                     if conf != -1 and conf >= OCR_MIN_CONFIDENCE:
                         filtered_text_parts.append(data["text"][i])  # type: ignore[index]
 
-                text = " ".join(filtered_text_parts).strip()
-
-            return text
+                return " ".join(filtered_text_parts).strip()
+            else:
+                return text
 
         except Exception as e:
             logger.warning(f"OCR extraction failed: {e}")
