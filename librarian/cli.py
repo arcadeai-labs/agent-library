@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """
-Librarian CLI - Markdown Document Management System.
+Librarian CLI - Context Management Service.
 
 A command-line interface for managing, indexing, and searching
-markdown documents with vector and full-text search capabilities.
+documents with vector and full-text search capabilities.
 
 Usage:
     libr --help
@@ -40,7 +40,7 @@ from rich.table import Table
 # Initialize Typer app
 app = typer.Typer(
     name="libr",
-    help="Librarian - Markdown Document Management System",
+    help="Librarian - Context Management Service",
     add_completion=True,
     rich_markup_mode="rich",
     invoke_without_command=True,
@@ -150,8 +150,11 @@ def _get_config() -> dict[str, Any]:
         DATABASE_PATH,
         DOCUMENTS_PATH,
         EMBEDDING_MODEL,
+        EMBEDDING_PROVIDER,
+        ENABLE_OCR,
         HYBRID_ALPHA,
         MMR_LAMBDA,
+        OCR_LANGUAGE,
         SEARCH_LIMIT,
         ensure_directories,
     )
@@ -159,7 +162,10 @@ def _get_config() -> dict[str, Any]:
     return {
         "DOCUMENTS_PATH": DOCUMENTS_PATH,
         "DATABASE_PATH": DATABASE_PATH,
+        "EMBEDDING_PROVIDER": EMBEDDING_PROVIDER,
         "EMBEDDING_MODEL": EMBEDDING_MODEL,
+        "ENABLE_OCR": ENABLE_OCR,
+        "OCR_LANGUAGE": OCR_LANGUAGE,
         "CHUNK_SIZE": CHUNK_SIZE,
         "CHUNK_OVERLAP": CHUNK_OVERLAP,
         "SEARCH_LIMIT": SEARCH_LIMIT,
@@ -167,6 +173,105 @@ def _get_config() -> dict[str, Any]:
         "HYBRID_ALPHA": HYBRID_ALPHA,
         "ensure_directories": ensure_directories,
     }
+
+
+def _should_skip_file(file_path: Path, supported_extensions: set[str]) -> bool:
+    """
+    Check if a file should be skipped during indexing.
+
+    Args:
+        file_path: Path to the file.
+        supported_extensions: Set of supported extensions.
+
+    Returns:
+        True if the file should be skipped.
+    """
+    # Skip system/hidden directories
+    skip_dirs = {
+        "__pycache__",
+        ".git",
+        ".svn",
+        ".hg",
+        "node_modules",
+        ".venv",
+        "venv",
+        ".pytest_cache",
+        ".mypy_cache",
+        ".ruff_cache",
+        "__MACOSX",
+        ".DS_Store",
+    }
+
+    # Check if file is in a skipped directory
+    for parent in file_path.parents:
+        if parent.name in skip_dirs:
+            return True
+
+    # Skip hidden files (starting with .)
+    if file_path.name.startswith("."):
+        return True
+
+    # Skip binary/system file extensions
+    skip_extensions = {
+        # Executables and binaries
+        ".exe",
+        ".bin",
+        ".dll",
+        ".so",
+        ".dylib",
+        ".a",
+        ".o",
+        # Disk images and archives
+        ".dmg",
+        ".iso",
+        ".img",
+        ".app",
+        ".pkg",
+        # Compressed archives
+        ".zip",
+        ".tar",
+        ".gz",
+        ".bz2",
+        ".xz",
+        ".7z",
+        ".rar",
+        # Python compiled
+        ".pyc",
+        ".pyo",
+        ".pyd",
+        # System files
+        ".lock",
+        ".log",
+        ".tmp",
+        ".temp",
+        ".cache",
+        # Media files (large binaries)
+        ".mp4",
+        ".mp3",
+        ".wav",
+        ".avi",
+        ".mov",
+        ".flac",
+        # Font files
+        ".ttf",
+        ".otf",
+        ".woff",
+        ".woff2",
+    }
+
+    if file_path.suffix.lower() in skip_extensions:
+        return True
+
+    # Skip files without extensions unless they're in supported list
+    # (e.g., README is supported, but random no-extension files aren't)
+    if not file_path.suffix:
+        return True
+
+    # Skip if extension not in supported list
+    if file_path.suffix.lower() not in supported_extensions:
+        return True
+
+    return False
 
 
 def _find_source(name_or_path: str) -> dict | None:
@@ -315,6 +420,25 @@ def list_sources(
 
     console.print(table)
 
+    # Check for duplicate names and warn
+    from collections import Counter
+
+    name_counts = Counter(s.get("name") for s in sources)
+    duplicates = {name: count for name, count in name_counts.items() if count > 1}
+
+    if duplicates:
+        rprint()
+        rprint("[yellow]Warning:[/yellow] Sources with duplicate names detected:")
+        for name, count in duplicates.items():
+            rprint(f"  '{name}' appears [bold]{count}[/bold] times")
+            paths = [s["path"] for s in sources if s.get("name") == name]
+            for p in paths:
+                rprint(f"    - {p}")
+        rprint()
+        rprint("To remove a specific source, use:")
+        rprint("  [cyan]libr rm <name> --path <full-path>[/cyan]")
+        rprint("  [cyan]libr rm <full-path>[/cyan]")
+
 
 # =============================================================================
 # libr add - Add source (file or directory)
@@ -365,19 +489,32 @@ def add_source(
 
     is_file = source_path.is_file()
 
+    # Get supported extensions from parser registry
+    from librarian.processing.parsers.registry import get_registry
+
+    registry = get_registry()
+    supported_extensions = registry.get_supported_extensions()
+
     # Validate file type
-    if is_file and source_path.suffix != ".md":
-        rprint(f"[red]Error:[/red] Not a markdown file: {source_path}")
+    if is_file and source_path.suffix.lower() not in supported_extensions:
+        rprint(f"[red]Error:[/red] Unsupported file type: {source_path.suffix}")
+        rprint(f"Supported: {', '.join(sorted(supported_extensions))}")
         raise typer.Exit(1)
 
     # Find files to index
     if is_file:
         files_to_index = [source_path]
     else:
-        if depth == 0:
-            files_to_index = list(source_path.glob("*.md"))
-        else:
-            files_to_index = list(source_path.rglob("*.md"))
+        # Find all files with supported extensions
+        files_to_index = []
+        for ext in supported_extensions:
+            if depth == 0:
+                files_to_index.extend(source_path.glob(f"*{ext}"))
+            else:
+                files_to_index.extend(source_path.rglob(f"*{ext}"))
+
+        # Filter out system/binary files
+        files_to_index = [f for f in files_to_index if not _should_skip_file(f, supported_extensions)]
 
         # Apply pattern filter
         if pattern:
@@ -397,8 +534,21 @@ def add_source(
         return
 
     # Create source entry
+    source_name = name or source_path.name
+
+    # Warn if this name already exists
+    existing_names = [s.get("name") for s in sources if s.get("name") == source_name]
+    if existing_names:
+        rprint(f"[yellow]Warning:[/yellow] A source named '{source_name}' already exists.")
+        rprint("  This will create duplicate names. Consider using --name to specify a unique name:")
+        rprint(f"  [cyan]libr add {path} --name {source_name}-2[/cyan]")
+        rprint()
+        if not typer.confirm("Continue anyway?", default=False):
+            rprint("[yellow]Cancelled.[/yellow]")
+            return
+
     source = {
-        "name": name or source_path.name,
+        "name": source_name,
         "path": str(source_path),
         "type": "local",
         "is_file": is_file,
@@ -470,8 +620,11 @@ def add_source(
 
 @app.command("rm")
 def remove_source(
-    name: Annotated[str, typer.Argument(help="Name of the source to remove")],
+    name: Annotated[str, typer.Argument(help="Name or path of the source to remove")],
     force: Annotated[bool, typer.Option("--force", "-f", help="Skip confirmation")] = False,
+    path: Annotated[
+        Optional[str], typer.Option("--path", help="Specify path if multiple sources share the same name")
+    ] = None,
 ) -> None:
     """Remove a source and its documents from the index."""
     cfg = _get_config()
@@ -480,16 +633,48 @@ def remove_source(
     sources = _load_sources()
     to_remove = None
 
+    # First try to match by exact path (most specific)
     for source in sources:
-        if source.get("name") == name:
+        if source.get("path") == name or source.get("path") == str(Path(name).resolve()):
             to_remove = source
             break
 
+    # If not found by path, try by name
+    if not to_remove:
+        matches = [s for s in sources if s.get("name") == name]
+
+        if len(matches) == 0:
+            rprint(f"[red]Error:[/red] Source not found: {name}")
+            rprint("\nAvailable sources:")
+            for s in sources:
+                rprint(f"  - {s.get('name')} ({s.get('path')})")
+            raise typer.Exit(1)
+        elif len(matches) == 1:
+            to_remove = matches[0]
+        else:
+            # Multiple sources with same name
+            if path:
+                # User specified path to disambiguate
+                to_remove = next((s for s in matches if s.get("path") == path), None)
+                if not to_remove:
+                    rprint(f"[red]Error:[/red] No source named '{name}' at path: {path}")
+                    raise typer.Exit(1)
+            else:
+                # Ambiguous - show options
+                rprint(f"[red]Error:[/red] Multiple sources named '{name}' found:")
+                rprint()
+                for i, s in enumerate(matches, 1):
+                    rprint(f"  [{i}] {s.get('path')}")
+                rprint()
+                rprint("Please specify which one using --path:")
+                rprint(f"  libr rm {name} --path <path>")
+                rprint()
+                rprint("Or remove by full path:")
+                rprint("  libr rm <full-path>")
+                raise typer.Exit(1)
+
     if not to_remove:
         rprint(f"[red]Error:[/red] Source not found: {name}")
-        rprint("\nAvailable sources:")
-        for s in sources:
-            rprint(f"  - {s.get('name')}")
         raise typer.Exit(1)
 
     if not force:
@@ -1078,7 +1263,10 @@ def config_show() -> None:
 
     items = [
         ("Database Path", cfg["DATABASE_PATH"], "DATABASE_PATH"),
+        ("Embedding Provider", cfg["EMBEDDING_PROVIDER"], "EMBEDDING_PROVIDER"),
         ("Embedding Model", cfg["EMBEDDING_MODEL"], "EMBEDDING_MODEL"),
+        ("OCR Enabled", str(cfg["ENABLE_OCR"]), "ENABLE_OCR"),
+        ("OCR Language", cfg["OCR_LANGUAGE"], "OCR_LANGUAGE"),
         ("Chunk Size", str(cfg["CHUNK_SIZE"]), "CHUNK_SIZE"),
         ("Chunk Overlap", str(cfg["CHUNK_OVERLAP"]), "CHUNK_OVERLAP"),
         ("Search Limit", str(cfg["SEARCH_LIMIT"]), "SEARCH_LIMIT"),

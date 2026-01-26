@@ -62,6 +62,104 @@ def _process_and_index_file(file_path: Path) -> dict[str, Any]:
     return get_indexing_service().index_file(file_path)
 
 
+def _should_skip_file(file_path: Path, supported_extensions: set[str]) -> bool:
+    """
+    Check if a file should be skipped during indexing.
+
+    Args:
+        file_path: Path to the file.
+        supported_extensions: Set of supported extensions.
+
+    Returns:
+        True if the file should be skipped.
+    """
+    # Skip system/hidden directories
+    skip_dirs = {
+        "__pycache__",
+        ".git",
+        ".svn",
+        ".hg",
+        "node_modules",
+        ".venv",
+        "venv",
+        ".pytest_cache",
+        ".mypy_cache",
+        ".ruff_cache",
+        "__MACOSX",
+        ".DS_Store",
+    }
+
+    # Check if file is in a skipped directory
+    for parent in file_path.parents:
+        if parent.name in skip_dirs:
+            return True
+
+    # Skip hidden files (starting with .)
+    if file_path.name.startswith("."):
+        return True
+
+    # Skip binary/system file extensions
+    skip_extensions = {
+        # Executables and binaries
+        ".exe",
+        ".bin",
+        ".dll",
+        ".so",
+        ".dylib",
+        ".a",
+        ".o",
+        # Disk images and archives
+        ".dmg",
+        ".iso",
+        ".img",
+        ".app",
+        ".pkg",
+        # Compressed archives
+        ".zip",
+        ".tar",
+        ".gz",
+        ".bz2",
+        ".xz",
+        ".7z",
+        ".rar",
+        # Python compiled
+        ".pyc",
+        ".pyo",
+        ".pyd",
+        # System files
+        ".lock",
+        ".log",
+        ".tmp",
+        ".temp",
+        ".cache",
+        # Media files (large binaries)
+        ".mp4",
+        ".mp3",
+        ".wav",
+        ".avi",
+        ".mov",
+        ".flac",
+        # Font files
+        ".ttf",
+        ".otf",
+        ".woff",
+        ".woff2",
+    }
+
+    if file_path.suffix.lower() in skip_extensions:
+        return True
+
+    # Skip files without extensions
+    if not file_path.suffix:
+        return True
+
+    # Skip if extension not in supported list
+    if file_path.suffix.lower() not in supported_extensions:
+        return True
+
+    return False
+
+
 # =============================================================================
 # Library Ingestion Tools
 # =============================================================================
@@ -90,13 +188,23 @@ async def index_directory_to_library(
     if not dir_path.is_dir():
         return {"error": f"Not a directory: {dir_path}", "indexed": 0}
 
-    # Find markdown files
-    pattern = "**/*.md" if recursive else "*.md"
-    md_files = list(dir_path.glob(pattern))
+    # Find all supported files
+    from librarian.processing.parsers.registry import get_registry
+
+    registry = get_registry()
+    supported_extensions = registry.get_supported_extensions()
+
+    all_files = []
+    for ext in supported_extensions:
+        pattern = f"**/*{ext}" if recursive else f"*{ext}"
+        all_files.extend(dir_path.glob(pattern))
+
+    # Filter out system/binary files
+    all_files = [f for f in all_files if not _should_skip_file(f, supported_extensions)]
 
     results: dict[str, Any] = {
         "directory": str(dir_path),
-        "total_files": len(md_files),
+        "total_files": len(all_files),
         "indexed": 0,
         "updated": 0,
         "skipped": 0,
@@ -106,7 +214,7 @@ async def index_directory_to_library(
 
     db = get_database()
 
-    for file_path in md_files:
+    for file_path in all_files:
         try:
             # Check if document exists and compare modification times
             existing = db.get_document_by_path(str(file_path))
@@ -459,6 +567,7 @@ async def search_library(
             "heading_path": r.heading_path,
             "score": round(r.score, 4),
             "snippet": r.snippet,
+            "asset_type": r.asset_type.value,
         }
         for r in results
     ]
@@ -515,6 +624,7 @@ async def search_library_by_dates(
             "heading_path": r.heading_path,
             "score": round(r.score, 4),
             "snippet": r.snippet,
+            "asset_type": r.asset_type.value,
             "date_range": {"start": start_date, "end": end_date},
         }
         for r in results
@@ -550,6 +660,7 @@ async def semantic_search_library(
             "content": r.content,
             "heading_path": r.heading_path,
             "score": round(r.score, 4),
+            "asset_type": r.asset_type.value,
         }
         for r in results
     ]
@@ -585,6 +696,7 @@ async def keyword_search_library(
             "heading_path": r.heading_path,
             "score": round(r.score, 4),
             "snippet": r.snippet,
+            "asset_type": r.asset_type.value,
         }
         for r in results
     ]
