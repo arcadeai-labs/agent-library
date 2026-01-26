@@ -1,8 +1,8 @@
 """
-Librarian - Markdown document management system.
+Librarian - Context Management Service.
 
 A complete system for maintaining, indexing, ingesting, and retrieving
-markdown documents through the Model Context Protocol (MCP).
+documents through the Model Context Protocol (MCP).
 
 Features:
 - SQLite-based storage with vector search (sqlite-vec)
