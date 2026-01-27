@@ -40,7 +40,11 @@ cd librarian
 Or install manually:
 
 ```bash
-uv pip install -e ".[dev]"
+# Install CLI globally (no venv activation needed)
+uv tool install -e . --python 3.11
+
+# For development (testing, linting)
+uv sync --dev
 ```
 
 ## CLI Usage
@@ -228,20 +232,20 @@ Images are currently indexed by **metadata only** (filename, format, dimensions,
 ```bash
 # OCR support (v0.6.0+)
 # Enabled by default - requires Tesseract
-uv pip install -e ".[ocr]"
+uv sync --extra ocr
 brew install tesseract  # macOS
 # To disable: export ENABLE_OCR=false
 
 # Vision support with CLIP (v0.7.0+)
-uv pip install -e ".[vision]"
+uv sync --extra vision
 export ENABLE_VISION_EMBEDDINGS=true
 
 # Code embeddings with CodeBERT (v0.8.0+)
-uv pip install -e ".[code]"
+uv sync --extra code
 export ENABLE_CODE_EMBEDDINGS=true
 
 # All features
-uv pip install -e ".[all]"
+uv sync --extra all
 ```
 
 Vision and code embeddings are **opt-in** and disabled by default. OCR is **enabled by default** (v0.6.0+).

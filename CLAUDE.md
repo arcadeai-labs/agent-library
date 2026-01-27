@@ -25,26 +25,32 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ### Setup & Installation
 ```bash
-./setup.sh              # Initial setup
-make install            # Install base dependencies
-make sync               # Sync dependencies from pyproject.toml
+./setup.sh              # Install CLI globally (no venv activation needed)
+./setup.sh --dev        # Also sync dev dependencies for development
+make setup              # Same as ./setup.sh --dev -y
+make install            # Sync dev dependencies only
+make install-tool       # Install CLI globally only
+
+# After setup, CLI is available globally:
+librarian --help
+libr --help
 
 # Install optional multi-modal dependencies
-uv pip install -e ".[pdf]"      # PDF processing (pypdf)
-uv pip install -e ".[vision]"   # Image processing (Pillow)
-uv pip install -e ".[all]"      # All multi-modal features
+uv sync --extra pdf      # PDF processing (pypdf)
+uv sync --extra vision   # Image processing (Pillow)
+uv sync --extra all      # All multi-modal features
 ```
 
 **Optional Dependencies:**
 - **PDF Support**: Install `pypdf` to enable PDF parsing
   ```bash
-  uv pip install -e ".[pdf]"
+  uv sync --extra pdf
   ```
   Without this, PDF files will be skipped during indexing.
 
 - **Image Support**: Install `Pillow` to enable image metadata extraction
   ```bash
-  uv pip install -e ".[vision]"
+  uv sync --extra vision
   ```
   Without this, image files will be skipped during indexing.
 
@@ -131,9 +137,9 @@ All components use strongly-typed enums:
      - Supports: Python, JavaScript, TypeScript, Go, Rust, Java, C++, etc.
      - Extracts: Classes, functions, methods, variables
    - `pdf.py`: PDF text extraction with page-based chunking (AssetType.PDF)
-     - Requires: `pypdf` (install with `uv pip install -e ".[pdf]"`)
+     - Requires: `pypdf` (install with `uv sync --extra pdf`)
    - `image.py`: Image metadata and EXIF extraction (AssetType.IMAGE)
-     - Requires: `Pillow` (install with `uv pip install -e ".[vision]"`)
+     - Requires: `Pillow` (install with `uv sync --extra vision`)
    - `registry.py`: Automatic parser selection by file extension
 
 2. **Chunking** (`transform/`):

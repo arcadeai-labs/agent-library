@@ -4,20 +4,29 @@ help: ## Show this help message
 	@grep -E '^[a-zA-Z_-]+:.*?## .*$$' $(MAKEFILE_LIST) | sort | awk 'BEGIN {FS = ":.*?## "}; {printf "\033[36m%-20s\033[0m %s\n", $$1, $$2}'
 
 .PHONY: setup
-setup: ## Run the setup script to install uv and create environment
-	@./setup.sh
+setup: ## Run the setup script (installs CLI globally + dev deps)
+	@./setup.sh --dev -y
 
 .PHONY: install
-install: ## Install the package in development mode
+install: ## Sync dev dependencies (for testing, linting, etc.)
 	@if ! command -v uv &> /dev/null; then \
 		echo "Installing uv"; \
 		curl -LsSf https://astral.sh/uv/install.sh | sh; \
 	fi
-	@uv pip install -e ".[dev]"
+	@uv sync --dev
+
+.PHONY: install-tool
+install-tool: ## Install librarian CLI globally (no venv needed)
+	@uv tool uninstall agent-library 2>/dev/null || true
+	@uv tool install -e . --python 3.11
+
+.PHONY: uninstall-tool
+uninstall-tool: ## Uninstall librarian CLI from global tools
+	@uv tool uninstall agent-library
 
 .PHONY: sync
 sync: ## Sync dependencies from pyproject.toml
-	@uv pip install -e ".[dev]"
+	@uv sync --dev
 
 .PHONY: build
 build: clean-build ## Build wheel file
@@ -79,5 +88,5 @@ pre-commit-install: ## Install pre-commit hooks
 
 .PHONY: evals
 evals: ## Run Arcade tool evaluations
-	@uv pip install -e ".[evals]"
+	@uv sync --extra evals
 	@uv run arcade evals . -p openai
