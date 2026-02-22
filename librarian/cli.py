@@ -65,6 +65,30 @@ SOURCES_FILE = CONFIG_DIR / "sources.json"
 SETTINGS_FILE = CONFIG_DIR / "settings.json"
 
 
+def _apply_settings_to_env() -> None:
+    """Load settings.json and apply as environment variables.
+
+    This must run BEFORE any librarian modules are imported so that
+    config.py picks up the values via os.getenv().
+
+    Priority: explicit env vars > settings.json > defaults
+    """
+    if SETTINGS_FILE.exists():
+        try:
+            with open(SETTINGS_FILE) as f:
+                for key, value in json.load(f).items():
+                    if key not in os.environ:
+                        os.environ[key] = (
+                            str(value).lower() if isinstance(value, bool) else str(value)
+                        )
+        except (json.JSONDecodeError, OSError):
+            pass
+
+
+# Apply settings before any librarian imports
+_apply_settings_to_env()
+
+
 # =============================================================================
 # Enums
 # =============================================================================
@@ -147,15 +171,22 @@ def _get_config() -> dict[str, Any]:
     from librarian.config import (
         CHUNK_OVERLAP,
         CHUNK_SIZE,
+        CODE_EMBEDDING_DIMENSION,
+        CODE_EMBEDDING_MODEL,
+        CODE_EMBEDDING_PROVIDER,
         DATABASE_PATH,
         DOCUMENTS_PATH,
         EMBEDDING_MODEL,
         EMBEDDING_PROVIDER,
+        ENABLE_CODE_EMBEDDINGS,
         ENABLE_OCR,
+        ENABLE_VISION_EMBEDDINGS,
         HYBRID_ALPHA,
         MMR_LAMBDA,
         OCR_LANGUAGE,
         SEARCH_LIMIT,
+        VISION_EMBEDDING_DIMENSION,
+        VISION_EMBEDDING_MODEL,
         ensure_directories,
     )
 
@@ -171,6 +202,13 @@ def _get_config() -> dict[str, Any]:
         "SEARCH_LIMIT": SEARCH_LIMIT,
         "MMR_LAMBDA": MMR_LAMBDA,
         "HYBRID_ALPHA": HYBRID_ALPHA,
+        "ENABLE_CODE_EMBEDDINGS": ENABLE_CODE_EMBEDDINGS,
+        "CODE_EMBEDDING_MODEL": CODE_EMBEDDING_MODEL,
+        "CODE_EMBEDDING_DIMENSION": CODE_EMBEDDING_DIMENSION,
+        "CODE_EMBEDDING_PROVIDER": CODE_EMBEDDING_PROVIDER,
+        "ENABLE_VISION_EMBEDDINGS": ENABLE_VISION_EMBEDDINGS,
+        "VISION_EMBEDDING_MODEL": VISION_EMBEDDING_MODEL,
+        "VISION_EMBEDDING_DIMENSION": VISION_EMBEDDING_DIMENSION,
         "ensure_directories": ensure_directories,
     }
 
@@ -593,25 +631,49 @@ def add_source(
             )
         )
 
-        if verbose:
-            for file_info in result.get("files", []):
-                fpath = file_info.get("path", "")
-                status = file_info.get("status", "")
+        skipped_deps = []
+        for file_info in result.get("files", []):
+            fpath = file_info.get("path", "")
+            status = file_info.get("status", "")
+            reason = file_info.get("reason", "")
+            if verbose:
                 if status == "created":
                     rprint(f"  [green]+[/green] {fpath}")
                 elif status == "updated":
                     rprint(f"  [yellow]~[/yellow] {fpath}")
+                elif status == "skipped" and reason:
+                    rprint(f"  [dim]-[/dim] {Path(fpath).name} [dim](skipped)[/dim]")
+            if status == "skipped" and reason and "Install with" in reason:
+                skipped_deps.append(reason)
 
-        rprint(
-            Panel(
-                f"[green]Source added and indexed![/green]\n\n"
-                f"Name: [cyan]{source['name']}[/cyan]\n"
-                f"Path: [blue]{source_path}[/blue]\n"
-                f"Files found: [yellow]{len(files_to_index)}[/yellow]\n"
-                f"Indexed: [cyan]{result.get('indexed', 0)}[/cyan]",
-                title="Source Added",
-            )
+        # Show unique dependency warnings
+        seen_warnings: set[str] = set()
+        for reason in skipped_deps:
+            # Extract the first line (the main message) for deduplication
+            key = reason.split("\n")[0] if "\n" in reason else reason
+            if key not in seen_warnings:
+                seen_warnings.add(key)
+                rprint(f"  [yellow]Note:[/yellow] {key}")
+
+        errors = result.get("errors", [])
+        if errors:
+            for err in errors:
+                rprint(f"  [red]Error:[/red] {err.get('path', '')}: {err.get('error', '')}")
+
+        skipped = result.get("skipped", 0)
+        summary = (
+            f"[green]Source added and indexed![/green]\n\n"
+            f"Name: [cyan]{source['name']}[/cyan]\n"
+            f"Path: [blue]{source_path}[/blue]\n"
+            f"Files found: [yellow]{len(files_to_index)}[/yellow]\n"
+            f"Indexed: [cyan]{result.get('indexed', 0)}[/cyan]"
         )
+        if skipped:
+            summary += f"\nSkipped: [dim]{skipped}[/dim]"
+        if errors:
+            summary += f"\nErrors: [red]{len(errors)}[/red]"
+
+        rprint(Panel(summary, title="Source Added"))
 
 
 # =============================================================================
@@ -1008,7 +1070,15 @@ def docs_list(
 
     # JSON output
     if output_format == OutputFormat.JSON:
-        output = [{"id": d.id, "title": d.title, "path": d.path} for d in documents[:limit]]
+        output = [
+            {
+                "id": d.id,
+                "title": d.title,
+                "path": d.path,
+                "type": d.asset_type.value if d.asset_type else "text",
+            }
+            for d in documents[:limit]
+        ]
         print(json.dumps(output, indent=2))
         return
 
@@ -1025,13 +1095,15 @@ def docs_list(
         header_style="bold cyan",
     )
     table.add_column("ID", style="dim", width=4)
-    table.add_column("Title", style="green", max_width=40)
-    table.add_column("Path", style="blue", max_width=50)
+    table.add_column("Title", style="green", max_width=38)
+    table.add_column("Path", style="blue", max_width=46)
+    table.add_column("Type", style="magenta", width=6)
 
     home = str(Path.home())
     for doc in documents[:limit]:
         short_path = doc.path.replace(home, "~")
-        table.add_row(str(doc.id), doc.title or "Untitled", short_path)
+        asset_type = doc.asset_type.value if doc.asset_type else "text"
+        table.add_row(str(doc.id), doc.title or "Untitled", short_path, asset_type)
 
     console.print(table)
 
@@ -1121,6 +1193,17 @@ def search_cmd(
     copy: Annotated[
         bool, typer.Option("--copy", "-c", help="Copy first result content to clipboard")
     ] = False,
+    code: Annotated[
+        bool,
+        typer.Option("--code", help="Search code files only (uses code embeddings if enabled)"),
+    ] = False,
+    images: Annotated[
+        bool,
+        typer.Option("--images", help="Search images only (uses vision embeddings if enabled)"),
+    ] = False,
+    asset_type: Annotated[
+        Optional[str], typer.Option("--type", help="Filter by asset type: text, code, pdf, image")
+    ] = None,
 ) -> None:
     """Search documents using semantic and keyword search."""
     cfg = _get_config()
@@ -1128,19 +1211,42 @@ def search_cmd(
 
     from librarian.server import (
         keyword_search_library,
+        search_code,
+        search_images,
         search_library,
         semantic_search_library,
     )
 
-    with console.status("Searching..."):
-        if mode == SearchMode.VECTOR:
-            results = _run_async(semantic_search_library(context=None, query=query, limit=limit))  # type: ignore[arg-type]
-        elif mode == SearchMode.KEYWORD:
-            results = _run_async(keyword_search_library(context=None, query=query, limit=limit))  # type: ignore[arg-type]
-        else:
-            results = _run_async(
-                search_library(context=None, query=query, limit=limit, use_mmr=True)
-            )  # type: ignore[arg-type]
+    # Handle specialized search modes
+    if code:
+        with console.status("Searching code..."):
+            results = _run_async(search_code(context=None, query=query, limit=limit))  # type: ignore[arg-type]
+    elif images:
+        with console.status("Searching images..."):
+            results = _run_async(search_images(context=None, query=query, limit=limit))  # type: ignore[arg-type]
+    else:
+        # Build asset_types filter
+        asset_types_filter: list[str] | None = None
+        if asset_type:
+            asset_types_filter = [asset_type.lower()]
+
+        with console.status("Searching..."):
+            if mode == SearchMode.VECTOR:
+                results = _run_async(
+                    semantic_search_library(context=None, query=query, limit=limit)
+                )  # type: ignore[arg-type]
+            elif mode == SearchMode.KEYWORD:
+                results = _run_async(keyword_search_library(context=None, query=query, limit=limit))  # type: ignore[arg-type]
+            else:
+                results = _run_async(
+                    search_library(
+                        context=None,
+                        query=query,
+                        limit=limit,
+                        use_mmr=True,
+                        asset_types=asset_types_filter,
+                    )
+                )  # type: ignore[arg-type]
 
     # Filter by source
     if source and results:
@@ -1274,13 +1380,32 @@ def config_show() -> None:
         ("Search Limit", str(cfg["SEARCH_LIMIT"]), "SEARCH_LIMIT"),
         ("MMR Lambda", str(cfg["MMR_LAMBDA"]), "MMR_LAMBDA"),
         ("Hybrid Alpha", str(cfg["HYBRID_ALPHA"]), "HYBRID_ALPHA"),
+        ("Enable Code Embeddings", str(cfg["ENABLE_CODE_EMBEDDINGS"]), "ENABLE_CODE_EMBEDDINGS"),
+        ("Code Embedding Model", cfg["CODE_EMBEDDING_MODEL"], "CODE_EMBEDDING_MODEL"),
+        (
+            "Code Embedding Dimension",
+            str(cfg["CODE_EMBEDDING_DIMENSION"]),
+            "CODE_EMBEDDING_DIMENSION",
+        ),
+        ("Code Embedding Provider", cfg["CODE_EMBEDDING_PROVIDER"], "CODE_EMBEDDING_PROVIDER"),
+        (
+            "Enable Vision Embeddings",
+            str(cfg["ENABLE_VISION_EMBEDDINGS"]),
+            "ENABLE_VISION_EMBEDDINGS",
+        ),
+        ("Vision Embedding Model", cfg["VISION_EMBEDDING_MODEL"], "VISION_EMBEDDING_MODEL"),
+        (
+            "Vision Embedding Dimension",
+            str(cfg["VISION_EMBEDDING_DIMENSION"]),
+            "VISION_EMBEDDING_DIMENSION",
+        ),
     ]
 
     for name, value, env_var in items:
+        # Determine source: settings.json takes priority, then explicit env var, then default
         if env_var in settings:
             source = "settings"
-            value = str(settings[env_var])
-        elif os.environ.get(env_var):
+        elif env_var in os.environ and env_var not in settings:
             source = "env"
         else:
             source = "default"
@@ -1299,21 +1424,44 @@ def config_path() -> None:
     rprint(f"Database: [cyan]{cfg['DATABASE_PATH']}[/cyan]")
 
 
+@config_app.command("models")
+def config_models() -> None:
+    """Check status of embedding models and download if needed."""
+    from librarian.processing.embed import get_embedding_registry
+
+    _get_config()
+
+    registry = get_embedding_registry()
+
+    rprint("[cyan]Checking embedding models...[/cyan]\n")
+
+    results = registry.ensure_models()
+
+    table = Table(title="Embedding Models", show_header=True, header_style="bold cyan")
+    table.add_column("Modality", style="green")
+    table.add_column("Status")
+
+    for modality, status in results.items():
+        if "loaded" in status:
+            style = "green"
+        elif "disabled" in status:
+            style = "yellow"
+        else:
+            style = "red"
+        table.add_row(modality, f"[{style}]{status}[/{style}]")
+
+    console.print(table)
+
+
 @config_app.command("get")
 def config_get(
     key: Annotated[str, typer.Argument(help="Configuration key to get")],
 ) -> None:
     """Get a specific configuration value."""
     cfg = _get_config()
-    settings = _load_settings()
 
-    # Check settings file first, then env, then defaults
-    if key in settings:
-        print(settings[key])
-    elif key in cfg:
+    if key in cfg and key != "ensure_directories":
         print(cfg[key])
-    elif os.environ.get(key):
-        print(os.environ[key])
     else:
         rprint(f"[red]Unknown configuration key:[/red] {key}")
         rprint("\nAvailable keys:")
@@ -1331,12 +1479,22 @@ def config_set(
     """Set a configuration value (persisted to settings file)."""
     valid_keys = {
         "DATABASE_PATH",
+        "EMBEDDING_PROVIDER",
         "EMBEDDING_MODEL",
         "CHUNK_SIZE",
         "CHUNK_OVERLAP",
         "SEARCH_LIMIT",
         "MMR_LAMBDA",
         "HYBRID_ALPHA",
+        "ENABLE_CODE_EMBEDDINGS",
+        "CODE_EMBEDDING_MODEL",
+        "CODE_EMBEDDING_DIMENSION",
+        "CODE_EMBEDDING_PROVIDER",
+        "ENABLE_VISION_EMBEDDINGS",
+        "VISION_EMBEDDING_MODEL",
+        "VISION_EMBEDDING_DIMENSION",
+        "ENABLE_OCR",
+        "OCR_LANGUAGE",
     }
 
     if key not in valid_keys:
@@ -1348,19 +1506,31 @@ def config_set(
 
     settings = _load_settings()
 
-    # Type conversion for numeric values
-    if key in ("CHUNK_SIZE", "CHUNK_OVERLAP", "SEARCH_LIMIT"):
+    # Type conversion based on key
+    int_keys = (
+        "CHUNK_SIZE",
+        "CHUNK_OVERLAP",
+        "SEARCH_LIMIT",
+        "CODE_EMBEDDING_DIMENSION",
+        "VISION_EMBEDDING_DIMENSION",
+    )
+    float_keys = ("MMR_LAMBDA", "HYBRID_ALPHA")
+    bool_keys = ("ENABLE_CODE_EMBEDDINGS", "ENABLE_VISION_EMBEDDINGS", "ENABLE_OCR")
+
+    if key in int_keys:
         try:
             settings[key] = int(value)
         except ValueError:
             rprint(f"[red]Error:[/red] {key} must be an integer")
             raise typer.Exit(1) from None
-    elif key in ("MMR_LAMBDA", "HYBRID_ALPHA"):
+    elif key in float_keys:
         try:
             settings[key] = float(value)
         except ValueError:
             rprint(f"[red]Error:[/red] {key} must be a number")
             raise typer.Exit(1) from None
+    elif key in bool_keys:
+        settings[key] = value.lower() in ("true", "1", "yes", "on")
     else:
         settings[key] = value
 

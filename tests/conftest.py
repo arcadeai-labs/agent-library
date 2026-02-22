@@ -24,11 +24,25 @@ class FakeEmbeddingProvider:
     Fake embedding provider for tests.
 
     Uses text hashing to generate consistent embeddings for the same input.
+    Implements validate(), _is_clip_model(), _is_codebert_model() to match
+    LocalEmbeddingProvider interface (tests patch at class level).
     """
 
     def __init__(self, model_name: str = "fake-model", dimension: int = 384) -> None:
         self._model_name = model_name
         self._dimension = dimension
+
+    def validate(self) -> bool:
+        """Always valid in tests."""
+        return True
+
+    def _is_clip_model(self) -> bool:
+        """Not a CLIP model in tests."""
+        return False
+
+    def _is_codebert_model(self) -> bool:
+        """Not a CodeBERT model in tests."""
+        return False
 
     @property
     def model_name(self) -> str:

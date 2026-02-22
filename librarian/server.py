@@ -22,6 +22,8 @@ from librarian.config import (
     CHUNK_OVERLAP,
     CHUNK_SIZE,
     DOCUMENTS_PATH,
+    ENABLE_CODE_EMBEDDINGS,
+    ENABLE_VISION_EMBEDDINGS,
     HYBRID_ALPHA,
     MMR_LAMBDA,
     SEARCH_LIMIT,
@@ -31,6 +33,7 @@ from librarian.indexing import get_indexing_service
 from librarian.processing.embed import get_embedder
 from librarian.retrieval.search import HybridSearcher
 from librarian.storage.database import get_database
+from librarian.types import AssetType, EmbeddingModality
 from librarian.utils.timeframe import Timeframe, get_timeframe_bounds, parse_date_string
 
 logger = logging.getLogger(__name__)
@@ -238,6 +241,15 @@ async def index_directory_to_library(
             else:
                 results["updated"] += 1
 
+        except ImportError as e:
+            # Missing optional dependency (e.g., Pillow for images, pypdf for PDFs)
+            logger.info("Skipping %s: %s", file_path.name, e)
+            results["files"].append({
+                "path": str(file_path),
+                "status": "skipped",
+                "reason": str(e),
+            })
+            results["skipped"] += 1
         except Exception as e:
             logger.exception("Error indexing %s", file_path)
             results["errors"].append({"path": str(file_path), "error": str(e)})
@@ -517,6 +529,10 @@ async def search_library(
         "Filter by time: today, yesterday, this_week, last_week, "
         "this_month, last_month, last_7_days, last_30_days, this_year",
     ] = None,
+    asset_types: Annotated[
+        list[str] | None,
+        "Filter by content types: text, code, pdf, image. Omit to search all types.",
+    ] = None,
 ) -> list[dict[str, Any]]:
     """
     Search the agent's library for relevant information.
@@ -548,11 +564,23 @@ async def search_library(
         except ValueError:
             pass  # Invalid timeframe, ignore filter
 
+    # Convert asset_types strings to AssetType enums
+    asset_type_filter: list[AssetType] | None = None
+    if asset_types:
+        import contextlib
+
+        with contextlib.suppress(ValueError):
+            asset_type_filter = [AssetType(t.lower()) for t in asset_types]
+
     searcher = _get_searcher()
     searcher.hybrid_alpha = hybrid_alpha
 
     results = searcher.search(
-        query, limit=limit, use_mmr=use_mmr, filter_document_ids=filter_doc_ids
+        query,
+        limit=limit,
+        use_mmr=use_mmr,
+        filter_document_ids=filter_doc_ids,
+        asset_types=asset_type_filter,
     )
 
     return [
@@ -694,6 +722,141 @@ async def keyword_search_library(
             "score": round(r.score, 4),
             "snippet": r.snippet,
             "asset_type": r.asset_type.value,
+        }
+        for r in results
+    ]
+
+
+@app.tool
+async def search_code(
+    context: Context,
+    query: Annotated[str, "Natural language description of the code to find"],
+    limit: Annotated[int, "Maximum number of results"] = 10,
+    language: Annotated[
+        str | None, "Filter by programming language (e.g., python, javascript)"
+    ] = None,
+) -> list[dict[str, Any]]:
+    """
+    Search code files using code-optimized semantic search.
+
+    When code embeddings are enabled (CodeBERT), this uses specialized
+    embeddings that understand code structure and semantics better than
+    general text search.
+
+    Best for finding:
+    - Functions or classes by description ("function that parses JSON")
+    - Code implementing specific functionality ("authentication middleware")
+    - Similar code patterns across the codebase
+
+    Falls back to regular text search filtered to code files when
+    code embeddings are not enabled.
+    """
+    if not query.strip():
+        return []
+
+    searcher = _get_searcher()
+
+    # Try code-specific search if enabled
+    if ENABLE_CODE_EMBEDDINGS:
+        results = searcher.vector_search_by_modality(
+            query, EmbeddingModality.CODE, limit=limit * 2 if language else limit
+        )
+    else:
+        # Fall back to regular search filtered to code
+        results = searcher.search(
+            query, limit=limit * 2 if language else limit, asset_types=[AssetType.CODE]
+        )
+
+    # Filter by language if specified
+    if language and results:
+        language_lower = language.lower()
+        results = [r for r in results if _chunk_matches_language(r.chunk_id, language_lower)][
+            :limit
+        ]
+
+    return [
+        {
+            "chunk_id": r.chunk_id,
+            "document_id": r.document_id,
+            "document_path": r.document_path,
+            "content": r.content,
+            "heading_path": r.heading_path,
+            "score": round(r.score, 4),
+            "asset_type": r.asset_type.value,
+            "uses_code_embeddings": ENABLE_CODE_EMBEDDINGS,
+        }
+        for r in results[:limit]
+    ]
+
+
+def _chunk_matches_language(chunk_id: int, language: str) -> bool:
+    """Check if a chunk's document matches the specified programming language."""
+    import json
+
+    db = get_database()
+    with db.connection() as conn:
+        row = conn.execute(
+            """
+            SELECT d.metadata FROM chunks c
+            JOIN documents d ON c.document_id = d.id
+            WHERE c.id = ?
+            """,
+            (chunk_id,),
+        ).fetchone()
+        if row and row["metadata"]:
+            try:
+                metadata = json.loads(row["metadata"])
+            except (json.JSONDecodeError, AttributeError):
+                return False
+            else:
+                doc_language = metadata.get("language", "").lower()
+                return language in doc_language or doc_language in language
+    return False
+
+
+@app.tool
+async def search_images(
+    context: Context,
+    query: Annotated[str, "Natural language description of the image to find"],
+    limit: Annotated[int, "Maximum number of results"] = 10,
+) -> list[dict[str, Any]]:
+    """
+    Search images using vision-optimized semantic search.
+
+    When vision embeddings are enabled (CLIP), this uses specialized
+    embeddings that can match natural language descriptions to image
+    content.
+
+    Best for finding:
+    - Images by description ("diagram showing system architecture")
+    - Screenshots with specific content ("error message screenshot")
+    - Similar visual content
+
+    Falls back to text search of image metadata (filename, OCR text)
+    when vision embeddings are not enabled.
+    """
+    if not query.strip():
+        return []
+
+    searcher = _get_searcher()
+
+    # Try vision-specific search if enabled
+    if ENABLE_VISION_EMBEDDINGS:
+        results = searcher.vector_search_by_modality(query, EmbeddingModality.VISION, limit=limit)
+    else:
+        # Fall back to regular search filtered to images
+        results = searcher.search(query, limit=limit, asset_types=[AssetType.IMAGE])
+
+    return [
+        {
+            "chunk_id": r.chunk_id,
+            "document_id": r.document_id,
+            "document_path": r.document_path,
+            "content": r.content,
+            "heading_path": r.heading_path,
+            "score": round(r.score, 4),
+            "asset_type": r.asset_type.value,
+            "uses_vision_embeddings": ENABLE_VISION_EMBEDDINGS,
         }
         for r in results
     ]

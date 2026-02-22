@@ -2,20 +2,25 @@
 Indexing service for document management.
 
 Coordinates the full indexing pipeline: processing files and storing
-them in the database with embeddings.
+them in the database with embeddings. Supports multi-modal embeddings
+for text, code, and vision content.
 """
 
 import logging
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
-from librarian.processing.embed import get_embedder
+from librarian.config import ENABLE_CODE_EMBEDDINGS, ENABLE_VISION_EMBEDDINGS
+from librarian.processing.embed import get_embedder, get_embedder_for_modality
 from librarian.processing.parsers.registry import get_parser_for_file
 from librarian.processing.transform.chunker import Chunker, ChunkingStrategy
 from librarian.processing.transform.code import CodeChunker, chunk_code_by_blocks
 from librarian.processing.transform.pdf import PDFChunker
 from librarian.storage.database import get_database
 from librarian.types import AssetType, Chunk, Document, EmbeddingModality
+
+if TYPE_CHECKING:
+    from PIL.Image import Image as PILImage
 
 logger = logging.getLogger(__name__)
 
@@ -25,6 +30,7 @@ class IndexingService:
     Service for indexing documents into the database.
 
     Coordinates parsing, chunking, embedding generation, and database storage.
+    Supports multi-modal embeddings (text, code, vision) when enabled.
     """
 
     def __init__(self) -> None:
@@ -32,6 +38,90 @@ class IndexingService:
         self._text_chunker = Chunker(strategy=ChunkingStrategy.HEADERS)
         self._code_chunker = CodeChunker()
         self._pdf_chunker = PDFChunker()
+
+    def _determine_modality(self, asset_type: AssetType) -> EmbeddingModality:
+        """
+        Determine embedding modality based on asset type and configuration.
+
+        Uses specialized embedding models (CodeBERT, CLIP) when enabled,
+        otherwise falls back to text embeddings.
+
+        Args:
+            asset_type: The type of asset being indexed.
+
+        Returns:
+            The appropriate embedding modality for the asset.
+        """
+        if asset_type == AssetType.CODE and ENABLE_CODE_EMBEDDINGS:
+            return EmbeddingModality.CODE
+        elif asset_type == AssetType.IMAGE and ENABLE_VISION_EMBEDDINGS:
+            return EmbeddingModality.VISION
+        return EmbeddingModality.TEXT
+
+    def _load_image(self, file_path: Path) -> "PILImage | None":  # type: ignore[no-any-unimported]
+        """
+        Load a PIL Image from a file path.
+
+        Args:
+            file_path: Path to the image file.
+
+        Returns:
+            PIL Image object, or None if loading fails.
+        """
+        try:
+            from PIL import Image
+
+            return Image.open(file_path)
+        except ImportError:
+            logger.warning("PIL not available for image loading")
+            return None
+        except Exception as e:
+            logger.warning(f"Failed to load image {file_path}: {e}")
+            return None
+
+    def _embed_image_chunks(
+        self, file_path: Path, chunks: list[Any], embedder: Any
+    ) -> list[list[float]]:
+        """
+        Embed image chunks using actual PIL Image data.
+
+        For images with vision embeddings enabled, this loads the actual
+        image and passes it to the CLIP model for true visual embedding.
+
+        Args:
+            file_path: Path to the image file.
+            chunks: List of chunks (for images, usually just one).
+            embedder: The vision embedder (CLIP-based).
+
+        Returns:
+            List of embedding vectors for each chunk.
+        """
+        img = self._load_image(file_path)
+        if img is None:
+            # Fall back to text embedding of image description
+            logger.warning(f"Could not load image {file_path}, using text description")
+            result: list[list[float]] = embedder.embed_documents([c.content for c in chunks])
+            return result
+
+        # For images, we typically have a single chunk representing the whole image
+        # We embed the actual image pixels, not the text description
+        try:
+            # Use embed_image method if available (LocalEmbeddingProvider)
+            if hasattr(embedder, "embed_image"):
+                embedding: list[float] = embedder.embed_image(img)
+                img.close()
+                # Return same embedding for all chunks (usually just one for images)
+                return [embedding] * len(chunks)
+            else:
+                # For embedders that support images in embed() directly
+                embedding = embedder.embed(img)
+                img.close()
+                return [embedding] * len(chunks)
+        except Exception as e:
+            logger.warning(f"Vision embedding failed for {file_path}: {e}, using text fallback")
+            img.close()
+            fallback: list[list[float]] = embedder.embed_documents([c.content for c in chunks])
+            return fallback
 
     def index_file(self, file_path: Path, timeout: float = 5.0) -> dict[str, Any]:
         """
@@ -49,7 +139,6 @@ class IndexingService:
             FileNotFoundError: If file doesn't exist.
         """
         db = get_database()
-        embedder = get_embedder()
 
         # Get file modification time for change detection
         try:
@@ -146,17 +235,22 @@ class IndexingService:
             # Use text chunker for TEXT and other types
             chunks = self._text_chunker.chunk_document(parsed)
 
-        # Embed chunks
-        chunk_texts = [c.content for c in chunks]
-        embeddings = embedder.embed_documents(chunk_texts)
+        # Determine embedding modality and get appropriate embedder
+        modality = self._determine_modality(asset_type)
+        embedder = get_embedder_for_modality(modality)
 
-        # Determine embedding modality
-        # For now, we use TEXT modality for all assets since we're using text embedding models
-        # TODO: When specialized models are available (CodeBERT, CLIP), use:
-        #   - EmbeddingModality.CODE for code with CodeBERT
-        #   - EmbeddingModality.VISION for images with CLIP
-        #   - EmbeddingModality.TEXT for text documents
-        modality = EmbeddingModality.TEXT
+        # Fall back to text embedder if specialized one unavailable
+        if embedder is None:
+            logger.debug(f"Modality {modality.value} embedder not available, falling back to TEXT")
+            modality = EmbeddingModality.TEXT
+            embedder = get_embedder()
+
+        # Embed chunks - use PIL Image for vision embeddings
+        if modality == EmbeddingModality.VISION and asset_type == AssetType.IMAGE:
+            embeddings = self._embed_image_chunks(file_path, chunks, embedder)
+        else:
+            chunk_texts = [c.content for c in chunks]
+            embeddings = embedder.embed_documents(chunk_texts)
 
         # Store chunks with embeddings
         db_chunks = [

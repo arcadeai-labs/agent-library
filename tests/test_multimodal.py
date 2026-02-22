@@ -297,7 +297,7 @@ class TestMultiModalSearch:
         """Test that vector-only search preserves asset type."""
         from librarian.indexing import get_indexing_service
         from librarian.retrieval.search import HybridSearcher
-        from librarian.types import AssetType
+        from librarian.types import AssetType, EmbeddingModality
 
         service = get_indexing_service()
         search = HybridSearcher(embedder=fake_embedder)
@@ -307,8 +307,11 @@ class TestMultiModalSearch:
         if code_file.exists():
             service.index_file(code_file)
 
-            # Vector-only search
-            results = search.vector_search("calculator", limit=5)
+            # Code embeddings are now stored in CODE modality table,
+            # so use modality-specific search
+            results = search.vector_search_by_modality(
+                "calculator", EmbeddingModality.CODE, limit=5
+            )
 
             # Fake embedder may return empty results, but if there are results,
             # they should have correct asset type
