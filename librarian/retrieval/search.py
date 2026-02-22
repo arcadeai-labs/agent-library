@@ -3,7 +3,11 @@ Hybrid search and MMR retrieval.
 
 This module provides hybrid search combining vector similarity
 and full-text search, with Max Marginal Relevance (MMR) for
-diverse result selection.
+diverse result selection. Supports multi-modal search with
+specialized embeddings for code and vision content.
+
+Multi-modal search runs parallel queries across all enabled modalities
+(TEXT, CODE, VISION) and merges results with fair normalization.
 """
 
 import logging
@@ -11,11 +15,23 @@ from typing import TYPE_CHECKING
 
 import numpy as np
 
-from librarian.config import HYBRID_ALPHA, MMR_LAMBDA, SEARCH_LIMIT
+from librarian.config import (
+    ENABLE_CODE_EMBEDDINGS,
+    ENABLE_CROSS_MODAL_SEARCH,
+    ENABLE_VISION_EMBEDDINGS,
+    HYBRID_ALPHA,
+    MMR_LAMBDA,
+    MODALITY_WEIGHT_CODE,
+    MODALITY_WEIGHT_FTS,
+    MODALITY_WEIGHT_TEXT,
+    MODALITY_WEIGHT_VISION,
+    SEARCH_LIMIT,
+)
+from librarian.processing.embed import get_embedder_for_modality
 from librarian.storage.database import get_database
 from librarian.storage.fts_store import FTSStore
 from librarian.storage.vector_store import VectorStore
-from librarian.types import AssetType, SearchResult
+from librarian.types import AssetType, EmbeddingModality, SearchResult
 
 if TYPE_CHECKING:
     from librarian.processing.embed import Embedder
@@ -62,22 +78,38 @@ class HybridSearcher:
         limit: int | None = None,
         use_mmr: bool = True,
         filter_document_ids: list[int] | None = None,
+        asset_types: list[AssetType] | None = None,
     ) -> list[SearchResult]:
         """
-        Perform hybrid search.
+        Perform hybrid search across all enabled modalities.
+
+        When cross-modal search is enabled (default), searches TEXT, CODE,
+        and VISION modalities in parallel with fair normalization so all
+        content types have equal opportunity to appear in results.
 
         Args:
             query: The search query.
             limit: Maximum number of results to return.
             use_mmr: Whether to use MMR for diverse results.
             filter_document_ids: Optional list of document IDs to search within.
+            asset_types: Optional list of asset types to filter results by.
 
         Returns:
             List of search results ordered by relevance.
         """
         limit = limit or SEARCH_LIMIT
 
-        # Get results from both search methods
+        # Use multi-modal search if cross-modal search is enabled
+        if ENABLE_CROSS_MODAL_SEARCH:
+            return self.multi_modal_search(
+                query,
+                limit=limit,
+                use_mmr=use_mmr,
+                filter_document_ids=filter_document_ids,
+                asset_types=asset_types,
+            )
+
+        # Fall back to original text-only hybrid search
         vector_results = self._vector_search(query, limit * 2)
         fts_results = self._fts_search(query, limit * 2)
 
@@ -87,6 +119,10 @@ class HybridSearcher:
         # Filter by document IDs if specified
         if filter_document_ids:
             combined = [r for r in combined if r.document_id in filter_document_ids]
+
+        # Filter by asset types if specified
+        if asset_types:
+            combined = [r for r in combined if r.asset_type in asset_types]
 
         # Apply MMR if requested
         if use_mmr and len(combined) > limit:
@@ -132,6 +168,232 @@ class HybridSearcher:
         limit = limit or SEARCH_LIMIT
         return self._fts_search(query, limit)
 
+    def multi_modal_search(
+        self,
+        query: str,
+        limit: int | None = None,
+        use_mmr: bool = True,
+        filter_document_ids: list[int] | None = None,
+        asset_types: list[AssetType] | None = None,
+    ) -> list[SearchResult]:
+        """
+        Perform search across all enabled modalities with fair weighting.
+
+        Searches TEXT, CODE (if enabled), and VISION (if enabled) vector tables
+        in parallel, plus FTS. Results are normalized within each modality and
+        then combined with equal weighting.
+
+        This ensures all content types (documents, code, images) have equal
+        opportunity to appear in search results.
+
+        Args:
+            query: The search query.
+            limit: Maximum number of results to return.
+            use_mmr: Whether to use MMR for diverse results.
+            filter_document_ids: Optional list of document IDs to filter.
+            asset_types: Optional list of asset types to filter.
+
+        Returns:
+            List of search results from all modalities.
+        """
+        limit = limit or SEARCH_LIMIT
+
+        # Collect results from all enabled modalities
+        modality_results: dict[str, list[SearchResult]] = {}
+
+        # 1. TEXT modality (always enabled)
+        text_results = self._vector_search(query, limit * 2)
+        if text_results:
+            modality_results["text"] = text_results
+
+        # 2. CODE modality (if enabled)
+        if ENABLE_CODE_EMBEDDINGS:
+            code_results = self.vector_search_by_modality(query, EmbeddingModality.CODE, limit * 2)
+            if code_results:
+                modality_results["code"] = code_results
+
+        # 3. VISION modality (if enabled)
+        if ENABLE_VISION_EMBEDDINGS:
+            vision_results = self.vector_search_by_modality(
+                query, EmbeddingModality.VISION, limit * 2
+            )
+            if vision_results:
+                modality_results["vision"] = vision_results
+
+        # 4. FTS (keyword search)
+        fts_results = self._fts_search(query, limit * 2)
+        if fts_results:
+            modality_results["fts"] = fts_results
+
+        # Normalize and merge results
+        combined = self._merge_multi_modal_results(modality_results)
+
+        # Filter by document IDs if specified
+        if filter_document_ids:
+            combined = [r for r in combined if r.document_id in filter_document_ids]
+
+        # Filter by asset types if specified
+        if asset_types:
+            combined = [r for r in combined if r.asset_type in asset_types]
+
+        # Apply MMR if requested
+        if use_mmr and len(combined) > limit:
+            combined = self._apply_mmr(query, combined, limit)
+        else:
+            combined = combined[:limit]
+
+        return combined
+
+    def _merge_multi_modal_results(
+        self,
+        modality_results: dict[str, list[SearchResult]],
+    ) -> list[SearchResult]:
+        """
+        Merge results from multiple modalities with fair normalization.
+
+        Each modality's scores are normalized to 0-1 (best in modality = 1.0),
+        then combined with equal weighting. Chunks found in multiple modalities
+        get boosted scores.
+
+        Args:
+            modality_results: Dict mapping modality name to its results.
+
+        Returns:
+            Merged and scored results.
+        """
+        # Define weights for each modality (equal by default)
+        modality_weights = {
+            "text": MODALITY_WEIGHT_TEXT,
+            "code": MODALITY_WEIGHT_CODE,
+            "vision": MODALITY_WEIGHT_VISION,
+            "fts": MODALITY_WEIGHT_FTS,
+        }
+
+        # Normalize scores within each modality
+        normalized: dict[str, dict[int, float]] = {}
+        for modality, results in modality_results.items():
+            if not results:
+                continue
+
+            # Find max score in this modality for normalization
+            max_score = max(r.score for r in results) if results else 1.0
+            if max_score == 0:
+                max_score = 1.0
+
+            # Normalize to 0-1 scale
+            normalized[modality] = {r.chunk_id: r.score / max_score for r in results}
+
+        # Build combined results
+        combined: dict[int, SearchResult] = {}
+        chunk_modality_scores: dict[int, dict[str, float]] = {}
+
+        # Collect all chunks and their modality scores
+        for modality, results in modality_results.items():
+            for r in results:
+                chunk_id = r.chunk_id
+
+                # Store the result object (first occurrence wins)
+                if chunk_id not in combined:
+                    combined[chunk_id] = SearchResult(
+                        chunk_id=r.chunk_id,
+                        document_id=r.document_id,
+                        document_path=r.document_path,
+                        content=r.content,
+                        heading_path=r.heading_path,
+                        score=0.0,
+                        vector_score=r.vector_score,
+                        fts_score=r.fts_score,
+                        snippet=r.snippet,
+                        asset_type=r.asset_type,
+                    )
+                    chunk_modality_scores[chunk_id] = {}
+
+                # Store normalized score for this modality
+                if modality in normalized and chunk_id in normalized[modality]:
+                    chunk_modality_scores[chunk_id][modality] = normalized[modality][chunk_id]
+
+                # Update specific scores on the result
+                if modality == "fts":
+                    combined[chunk_id].fts_score = r.fts_score
+                    combined[chunk_id].snippet = r.snippet
+                elif modality == "text":
+                    combined[chunk_id].vector_score = r.vector_score
+
+        # Calculate final scores with fair weighting
+        # Each modality contributes equally, and chunks in multiple modalities get boosted
+        enabled_modalities = list(modality_results.keys())
+        total_weight = sum(modality_weights.get(m, 1.0) for m in enabled_modalities)
+
+        for chunk_id, result in combined.items():
+            scores = chunk_modality_scores.get(chunk_id, {})
+
+            # Weighted average of normalized scores
+            weighted_sum = 0.0
+            for modality, norm_score in scores.items():
+                weight = modality_weights.get(modality, 1.0)
+                weighted_sum += norm_score * weight
+
+            # Divide by total possible weight (so missing modalities reduce score)
+            result.score = weighted_sum / total_weight if total_weight > 0 else 0.0
+
+        # Sort by combined score
+        results = sorted(combined.values(), key=lambda x: x.score, reverse=True)
+
+        return results
+
+    def vector_search_by_modality(
+        self,
+        query: str,
+        modality: EmbeddingModality,
+        limit: int | None = None,
+    ) -> list[SearchResult]:
+        """
+        Perform vector search using modality-specific embeddings.
+
+        Uses specialized embedding models (CodeBERT for code, CLIP for vision)
+        when enabled, providing better semantic matching for that content type.
+
+        Args:
+            query: The search query (natural language description).
+            modality: The embedding modality to search (CODE, VISION, TEXT).
+            limit: Maximum number of results.
+
+        Returns:
+            List of search results from the specified modality.
+            Empty list if modality is not enabled.
+        """
+        limit = limit or SEARCH_LIMIT
+
+        # Get modality-specific embedder
+        embedder = get_embedder_for_modality(modality)
+        if embedder is None:
+            logger.info(f"Modality {modality.value} not enabled, returning empty results")
+            return []
+
+        # Generate query embedding with modality-specific model
+        try:
+            query_embedding = embedder.embed_query(query)
+        except ImportError as e:
+            logger.warning("Modality %s failed to load model: %s", modality.value, e)
+            return []
+
+        # Search the modality-specific vector table
+        results = self.vector_store.search_by_modality(query_embedding, modality, limit=limit)
+
+        return [
+            SearchResult(
+                chunk_id=r.chunk_id,
+                document_id=r.document_id,
+                document_path=r.document_path,
+                content=r.content,
+                heading_path=r.heading_path,
+                score=1.0 - r.distance,
+                vector_score=1.0 - r.distance,
+                asset_type=AssetType(r.asset_type),
+            )
+            for r in results
+        ]
+
     def _vector_search(self, query: str, limit: int) -> list[SearchResult]:
         """Perform vector similarity search."""
         query_embedding = self.embedder.embed_query(query)
@@ -159,7 +421,9 @@ class HybridSearcher:
         if not results:
             return []
 
-        # Convert BM25 scores to positive similarities
+        # Convert BM25 scores to positive similarities (0-1 scale)
+        # BM25 returns negative scores where more negative = better match
+        # So abs(rank) for the best match is highest
         max_rank = max(abs(r.rank) for r in results) if results else 1.0
         if max_rank == 0:
             max_rank = 1.0
@@ -171,8 +435,8 @@ class HybridSearcher:
                 document_path=r.document_path,
                 content=r.content,
                 heading_path=r.heading_path,
-                score=1.0 - (abs(r.rank) / max_rank),  # Normalize to 0-1
-                fts_score=1.0 - (abs(r.rank) / max_rank),
+                score=abs(r.rank) / max_rank,  # Normalize to 0-1, higher = better
+                fts_score=abs(r.rank) / max_rank,
                 snippet=r.snippet,
                 asset_type=AssetType(r.asset_type) if r.asset_type else AssetType.TEXT,
             )
@@ -253,6 +517,8 @@ class HybridSearcher:
         Apply Max Marginal Relevance to select diverse results.
 
         MMR balances relevance to query with diversity among results.
+        For multi-modal results, allocates slots proportionally to each
+        modality and runs MMR within each group, ensuring fair representation.
 
         Args:
             query: The search query.
@@ -265,62 +531,172 @@ class HybridSearcher:
         if len(candidates) <= limit:
             return candidates
 
-        # Get query embedding
-        query_embedding = np.array(self.embedder.embed_query(query))
+        # Group candidates by embedding dimension (modality)
+        # This allows us to handle TEXT (384-dim), CODE (768-dim), VISION (512-dim)
+        dimension_groups: dict[int, list[tuple[SearchResult, np.ndarray]]] = {}
 
-        # Get embeddings for all candidates
-        candidate_embeddings: dict[int, np.ndarray] = {}
         for result in candidates:
             embedding = self.vector_store.get_embedding(result.chunk_id)
             if embedding:
-                candidate_embeddings[result.chunk_id] = np.array(embedding)
+                dim = len(embedding)
+                if dim not in dimension_groups:
+                    dimension_groups[dim] = []
+                dimension_groups[dim].append((result, np.array(embedding)))
 
-        # If we don't have embeddings, fall back to simple ranking
-        if not candidate_embeddings:
+        # If no embeddings found, fall back to simple ranking
+        if not dimension_groups:
             return candidates[:limit]
 
+        # Get query embeddings for each modality
+        query_embeddings: dict[int, np.ndarray] = {}
+
+        # Text embedding (always available)
+        text_embedding = np.array(self.embedder.embed_query(query))
+        query_embeddings[len(text_embedding)] = text_embedding
+
+        # Code embedding (if enabled and dimension present)
+        if ENABLE_CODE_EMBEDDINGS:
+            try:
+                code_embedder = get_embedder_for_modality(EmbeddingModality.CODE)
+                if code_embedder:
+                    code_embedding = np.array(code_embedder.embed_query(query))
+                    query_embeddings[len(code_embedding)] = code_embedding
+            except Exception:
+                logger.debug(
+                    "Failed to generate code query embedding, skipping CODE modality in MMR"
+                )
+
+        # Vision embedding (if enabled and dimension present)
+        if ENABLE_VISION_EMBEDDINGS:
+            try:
+                vision_embedder = get_embedder_for_modality(EmbeddingModality.VISION)
+                if vision_embedder:
+                    vision_embedding = np.array(vision_embedder.embed_query(query))
+                    query_embeddings[len(vision_embedding)] = vision_embedding
+            except Exception:
+                logger.debug(
+                    "Failed to generate vision query embedding, skipping VISION modality in MMR"
+                )
+
+        # Separate candidates with and without query embeddings
+        modality_candidates: dict[int, list[tuple[SearchResult, np.ndarray]]] = {}
+        non_mmr_candidates: list[SearchResult] = []
+
+        for dim, group in dimension_groups.items():
+            if dim in query_embeddings:
+                modality_candidates[dim] = group
+            else:
+                for result, _emb in group:
+                    non_mmr_candidates.append(result)
+
+        # If no MMR candidates, return non-MMR candidates by score
+        if not modality_candidates:
+            non_mmr_candidates.sort(key=lambda x: x.score, reverse=True)
+            return non_mmr_candidates[:limit]
+
+        # Calculate total candidates for proportional allocation
+        total_mmr = sum(len(group) for group in modality_candidates.values())
+        total_non_mmr = len(non_mmr_candidates)
+        total_all = total_mmr + total_non_mmr
+
+        # Allocate slots proportionally to each modality
+        # Ensure each non-empty modality gets at least 1 slot
+        modality_slots: dict[int, int] = {}
+
+        # First pass: allocate proportional slots
+        for dim, group in modality_candidates.items():
+            proportion = len(group) / total_all
+            slots = max(1, round(limit * proportion))  # At least 1 slot
+            modality_slots[dim] = slots
+
+        # Non-MMR slots
+        non_mmr_slots = 0
+        if total_non_mmr > 0:
+            non_mmr_slots = max(1, round(limit * total_non_mmr / total_all))
+
+        # Adjust if we over-allocated
+        total_allocated = sum(modality_slots.values()) + non_mmr_slots
+        if total_allocated > limit:
+            # Scale down proportionally
+            scale = limit / total_allocated
+            for dim in modality_slots:
+                modality_slots[dim] = max(1, int(modality_slots[dim] * scale))
+            non_mmr_slots = max(0, limit - sum(modality_slots.values()))
+
+        # Run MMR within each modality group
+        all_selected: list[SearchResult] = []
+
+        for dim, group in modality_candidates.items():
+            slots = modality_slots.get(dim, 0)
+            if slots == 0:
+                continue
+
+            query_emb = query_embeddings[dim]
+
+            # Run MMR for this modality
+            selected_from_modality = self._mmr_for_group(group, query_emb, slots)
+            all_selected.extend(selected_from_modality)
+
+        # Add non-MMR candidates sorted by score
+        if non_mmr_slots > 0:
+            non_mmr_candidates.sort(key=lambda x: x.score, reverse=True)
+            all_selected.extend(non_mmr_candidates[:non_mmr_slots])
+
+        # Sort final selection by original score for display
+        all_selected.sort(key=lambda x: x.score, reverse=True)
+
+        return all_selected[:limit]
+
+    def _mmr_for_group(
+        self,
+        group: list[tuple[SearchResult, np.ndarray]],
+        query_embedding: np.ndarray,
+        limit: int,
+    ) -> list[SearchResult]:
+        """
+        Run MMR selection within a single modality group.
+
+        Args:
+            group: List of (SearchResult, embedding) tuples.
+            query_embedding: Query embedding for this modality.
+            limit: Number of results to select.
+
+        Returns:
+            Selected results.
+        """
+        if len(group) <= limit:
+            return [r for r, _e in group]
+
+        # Build embeddings lookup
+        embeddings = {r.chunk_id: emb for r, emb in group}
+
         selected: list[SearchResult] = []
-        remaining = list(candidates)
+        remaining = list(group)
 
         while len(selected) < limit and remaining:
             best_score = -float("inf")
             best_idx = 0
 
-            for i, candidate in enumerate(remaining):
-                if candidate.chunk_id not in candidate_embeddings:
-                    continue
-
-                cand_embedding = candidate_embeddings[candidate.chunk_id]
-
-                # Relevance: similarity to query
-                relevance = self._cosine_similarity(query_embedding, cand_embedding)
+            for i, (_candidate, cand_emb) in enumerate(remaining):
+                # Relevance to query
+                relevance = self._cosine_similarity(query_embedding, cand_emb)
 
                 # Diversity: max similarity to already selected
                 if selected:
-                    max_sim_to_selected = max(
-                        self._cosine_similarity(
-                            cand_embedding,
-                            candidate_embeddings.get(s.chunk_id, np.zeros_like(cand_embedding)),
-                        )
-                        for s in selected
-                        if s.chunk_id in candidate_embeddings
+                    max_sim = max(
+                        self._cosine_similarity(cand_emb, embeddings[s.chunk_id]) for s in selected
                     )
                 else:
-                    max_sim_to_selected = 0.0
+                    max_sim = 0.0
 
                 # MMR score
-                mmr_score = (
-                    self.mmr_lambda * relevance - (1 - self.mmr_lambda) * max_sim_to_selected
-                )
+                mmr_score = self.mmr_lambda * relevance - (1 - self.mmr_lambda) * max_sim
 
                 if mmr_score > best_score:
                     best_score = mmr_score
                     best_idx = i
 
-            selected.append(remaining.pop(best_idx))
-
-        # Sort final selection by original score for display
-        selected.sort(key=lambda x: x.score, reverse=True)
+            selected.append(remaining.pop(best_idx)[0])
 
         return selected
 

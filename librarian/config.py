@@ -75,7 +75,8 @@ EMBEDDING_QUERY_INSTRUCTION = os.getenv(
 # Code Embedding Configuration
 # =============================================================================
 
-ENABLE_CODE_EMBEDDINGS = safe_bool(os.getenv("ENABLE_CODE_EMBEDDINGS"), False)
+# Code embeddings enabled by default for better code search using CodeBERT
+ENABLE_CODE_EMBEDDINGS = safe_bool(os.getenv("ENABLE_CODE_EMBEDDINGS"), True)
 CODE_EMBEDDING_MODEL = os.getenv("CODE_EMBEDDING_MODEL", "microsoft/codebert-base")
 CODE_EMBEDDING_DIMENSION = safe_int(os.getenv("CODE_EMBEDDING_DIMENSION"), 768)
 CODE_EMBEDDING_PROVIDER = os.getenv("CODE_EMBEDDING_PROVIDER", "local")
@@ -84,8 +85,10 @@ CODE_EMBEDDING_PROVIDER = os.getenv("CODE_EMBEDDING_PROVIDER", "local")
 # Vision Embedding Configuration
 # =============================================================================
 
-ENABLE_VISION_EMBEDDINGS = safe_bool(os.getenv("ENABLE_VISION_EMBEDDINGS"), False)
-VISION_EMBEDDING_MODEL = os.getenv("VISION_EMBEDDING_MODEL", "openai/clip-vit-base-patch32")
+# Vision embeddings enabled by default for image search using CLIP
+ENABLE_VISION_EMBEDDINGS = safe_bool(os.getenv("ENABLE_VISION_EMBEDDINGS"), True)
+# Use sentence-transformers CLIP model name (not HuggingFace format)
+VISION_EMBEDDING_MODEL = os.getenv("VISION_EMBEDDING_MODEL", "clip-ViT-B-32")
 VISION_EMBEDDING_DIMENSION = safe_int(os.getenv("VISION_EMBEDDING_DIMENSION"), 512)
 
 # =============================================================================
@@ -136,10 +139,11 @@ HYBRID_ALPHA = safe_float(os.getenv("HYBRID_ALPHA"), 0.7)
 ENABLE_CROSS_MODAL_SEARCH = safe_bool(os.getenv("ENABLE_CROSS_MODAL_SEARCH"), True)
 CROSS_MODAL_SIMILARITY_THRESHOLD = safe_float(os.getenv("CROSS_MODAL_SIMILARITY_THRESHOLD"), 0.7)
 
-# Modality weights
+# Modality weights (equal by default for fair contribution)
 MODALITY_WEIGHT_TEXT = safe_float(os.getenv("MODALITY_WEIGHT_TEXT"), 1.0)
-MODALITY_WEIGHT_CODE = safe_float(os.getenv("MODALITY_WEIGHT_CODE"), 0.9)
-MODALITY_WEIGHT_VISION = safe_float(os.getenv("MODALITY_WEIGHT_VISION"), 0.8)
+MODALITY_WEIGHT_CODE = safe_float(os.getenv("MODALITY_WEIGHT_CODE"), 1.0)
+MODALITY_WEIGHT_VISION = safe_float(os.getenv("MODALITY_WEIGHT_VISION"), 1.0)
+MODALITY_WEIGHT_FTS = safe_float(os.getenv("MODALITY_WEIGHT_FTS"), 1.0)
 
 MODALITY_WEIGHTS = {
     EmbeddingModality.TEXT: MODALITY_WEIGHT_TEXT,

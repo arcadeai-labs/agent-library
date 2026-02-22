@@ -1,5 +1,8 @@
 .DS_Store
 
+# SQLite in-memory artifacts
+:memory:
+
 *.lock
 
 # From https://raw.githubusercontent.com/github/gitignore/main/Python.gitignore

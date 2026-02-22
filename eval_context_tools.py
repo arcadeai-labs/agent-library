@@ -12,20 +12,16 @@ Run with:
 
 from datetime import datetime, timedelta
 
-import arcade_evals
 from arcade_evals import (
     BinaryCritic,
     DatetimeCritic,
     EvalRubric,
     EvalSuite,
-    ExpectedToolCall,
+    ExpectedMCPToolCall,
     NumericCritic,
     SimilarityCritic,
     tool_eval,
 )
-
-# Use ExpectedToolCall instead of ExpectedMCPToolCall (API change)
-ExpectedMCPToolCall = ExpectedToolCall
 
 
 @tool_eval()

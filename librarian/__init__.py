@@ -21,32 +21,11 @@ Usage:
     from librarian.processing import ProcessingManager
 
     # For CLI
-    librarian --help
+    libr --help
 """
 
-from librarian.config import (
-    CHUNK_OVERLAP,
-    CHUNK_SIZE,
-    DATABASE_PATH,
-    DOCUMENTS_PATH,
-    EMBEDDING_MODEL,
-    EMBEDDING_PROVIDER,
-    HYBRID_ALPHA,
-    MMR_LAMBDA,
-    SEARCH_LIMIT,
-)
-
-__version__ = "0.8.0"
+__version__ = "0.9.0"
 
 __all__ = [
-    "CHUNK_OVERLAP",
-    "CHUNK_SIZE",
-    "DATABASE_PATH",
-    "DOCUMENTS_PATH",
-    "EMBEDDING_MODEL",
-    "EMBEDDING_PROVIDER",
-    "HYBRID_ALPHA",
-    "MMR_LAMBDA",
-    "SEARCH_LIMIT",
     "__version__",
 ]

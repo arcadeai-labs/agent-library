@@ -3,11 +3,14 @@ Local embedding provider using sentence-transformers.
 
 Provides embedding generation using locally-run sentence transformer models.
 Supports lazy loading to avoid startup overhead when embeddings aren't needed.
+
+Supports both text and image inputs for CLIP-based models.
 """
 
 import logging
 import threading
-from typing import TYPE_CHECKING
+import warnings
+from typing import TYPE_CHECKING, Any, Union
 
 import numpy as np
 
@@ -15,9 +18,46 @@ from librarian.config import EMBEDDING_DIMENSION, EMBEDDING_MODEL
 from librarian.processing.embed.base import EmbeddingProvider
 
 if TYPE_CHECKING:
+    from PIL.Image import Image as PILImage
     from sentence_transformers import SentenceTransformer
 
 logger = logging.getLogger(__name__)
+
+# Suppress sentence-transformers and transformers info/warning messages globally
+# (e.g., "No sentence-transformers model found...", "Using a slow image processor...")
+for _st_logger_name in [
+    "sentence_transformers",
+    "sentence_transformers.SentenceTransformer",
+    "transformers",
+    "transformers.image_processing_utils",
+]:
+    logging.getLogger(_st_logger_name).setLevel(logging.ERROR)
+
+# Suppress transformers FutureWarning about slow image processor
+warnings.filterwarnings("ignore", message=".*slow image processor.*", category=FutureWarning)
+
+# =============================================================================
+# Module-level dependency availability flags
+# (following the pattern used in parsers/image.py and parsers/pdf.py)
+# =============================================================================
+
+try:
+    from PIL import Image as _PIL_Image  # noqa: F401
+
+    PILLOW_AVAILABLE = True
+except ImportError:
+    PILLOW_AVAILABLE = False
+
+try:
+    import torch as _torch  # noqa: F401
+    import transformers as _transformers  # noqa: F401
+
+    TRANSFORMERS_AVAILABLE = True
+except ImportError:
+    TRANSFORMERS_AVAILABLE = False
+
+# Type alias for content that can be embedded (text or image)
+EmbeddableContent = Union[str, "PILImage"]  # type: ignore[no-any-unimported]
 
 
 class LocalEmbeddingProvider(EmbeddingProvider):
@@ -26,6 +66,8 @@ class LocalEmbeddingProvider(EmbeddingProvider):
 
     Lazily loads the model on first use to avoid startup costs.
     Thread-safe for concurrent embedding requests.
+
+    Models are automatically downloaded from HuggingFace Hub if not cached.
     """
 
     def __init__(
@@ -57,6 +99,7 @@ class LocalEmbeddingProvider(EmbeddingProvider):
         Lazily load and return the sentence transformer model.
 
         Thread-safe double-checked locking pattern.
+        Models are downloaded from HuggingFace Hub on first access if not cached.
         """
         if self._model is None:
             with self._lock:
@@ -64,31 +107,124 @@ class LocalEmbeddingProvider(EmbeddingProvider):
                     self._load_model()
         return self._model  # type: ignore[return-value]
 
+    def _is_clip_model(self) -> bool:
+        """Check if this is a CLIP-based model that supports images."""
+        model_lower = self._model_name.lower()
+        return "clip" in model_lower or "siglip" in model_lower
+
+    def _is_codebert_model(self) -> bool:
+        """Check if this is a CodeBERT-based model for code embeddings."""
+        model_lower = self._model_name.lower()
+        return "codebert" in model_lower or "codellama" in model_lower
+
+    def _check_dependencies(self) -> None:
+        """
+        Check that required dependencies are installed for this model type.
+
+        Raises:
+            ImportError: With a specific, actionable error message if deps are missing.
+        """
+        if self._is_clip_model() and not PILLOW_AVAILABLE:
+            msg = (
+                f"CLIP model '{self._model_name}' requires Pillow. "
+                f"Install with: pip install Pillow>=10.0.0\n"
+                f"Or install all vision dependencies: pip install -e '.[vision]'"
+            )
+            raise ImportError(msg)
+        elif self._is_codebert_model() and not TRANSFORMERS_AVAILABLE:
+            msg = (
+                f"CodeBERT model '{self._model_name}' requires transformers and torch. "
+                f"Install with: pip install transformers>=4.30.0 torch>=2.0.0\n"
+                f"Or install all code dependencies: pip install -e '.[code]'"
+            )
+            raise ImportError(msg)
+
+    def validate(self) -> bool:
+        """
+        Validate that this provider's dependencies are installed.
+
+        Does NOT load the model -- only checks that required imports will succeed.
+        Fast enough to call eagerly on embedder creation.
+
+        Returns:
+            True if all dependencies are available.
+
+        Raises:
+            ImportError: If required dependencies are missing.
+        """
+        self._check_dependencies()
+        return True
+
     def _load_model(self) -> None:
-        """Load the sentence transformer model."""
+        """
+        Load the sentence transformer model.
+
+        Downloads the model from HuggingFace Hub if not cached locally.
+        Suppresses noisy progress bars from weight materialization.
+        """
+        import os
+
+        # Check model-specific dependencies FIRST with clear error messages
+        self._check_dependencies()
+
+        # Suppress verbose logging and progress bars
+        for logger_name in [
+            "sentence_transformers",
+            "sentence_transformers.SentenceTransformer",
+            "transformers",
+        ]:
+            logging.getLogger(logger_name).setLevel(logging.ERROR)
+
+        warnings.filterwarnings("ignore", category=FutureWarning)
+        warnings.filterwarnings("ignore", message=".*use_fast.*")
+        os.environ["TRANSFORMERS_VERBOSITY"] = "error"
+        # Suppress tqdm progress bars (weight materialization, tokenizer loading, etc.)
+        old_tqdm_disable = os.environ.get("TQDM_DISABLE")
+        os.environ["TQDM_DISABLE"] = "1"
+
         try:
             from sentence_transformers import SentenceTransformer
-
-            logger.info("Loading local embedding model: %s", self._model_name)
-
-            if self._device:
-                self._model = SentenceTransformer(self._model_name, device=self._device)
-            else:
-                self._model = SentenceTransformer(self._model_name)
-
-            self._dimension = self._model.get_sentence_embedding_dimension()
-            logger.info(
-                "Loaded model %s with dimension %d",
-                self._model_name,
-                self._dimension,
-            )
-
         except ImportError as e:
             msg = (
                 "sentence-transformers is required for local embedding. "
                 "Install with: pip install sentence-transformers"
             )
             raise ImportError(msg) from e
+
+        logger.info(
+            "Loading local embedding model: %s (will download if not cached)",
+            self._model_name,
+        )
+
+        try:
+            if self._device:
+                self._model = SentenceTransformer(self._model_name, device=self._device)
+            else:
+                self._model = SentenceTransformer(self._model_name)
+        except ImportError as e:
+            # Model loaded but a sub-dependency is missing (e.g., Pillow for CLIP)
+            error_str = str(e).lower()
+            if "pillow" in error_str or "pil" in error_str or "vision" in error_str:
+                msg = (
+                    f"Model '{self._model_name}' requires Pillow for image processing. "
+                    f"Install with: pip install Pillow>=10.0.0\n"
+                    f"Or install all vision dependencies: pip install -e '.[vision]'"
+                )
+                raise ImportError(msg) from e
+            raise
+        finally:
+            # Restore TQDM_DISABLE
+            if old_tqdm_disable is None:
+                os.environ.pop("TQDM_DISABLE", None)
+            else:
+                os.environ["TQDM_DISABLE"] = old_tqdm_disable
+
+        self._dimension = self._model.get_sentence_embedding_dimension()
+        logger.info(
+            "Loaded model %s with dimension %d",
+            self._model_name,
+            self._dimension,
+        )
 
     @property
     def dimension(self) -> int:
@@ -97,33 +233,99 @@ class LocalEmbeddingProvider(EmbeddingProvider):
             _ = self.model  # Trigger load
         return self._dimension or EMBEDDING_DIMENSION
 
-    def embed(self, text: str) -> list[float]:
-        """Generate embedding for a single text."""
-        embedding = self.model.encode(text, convert_to_numpy=True)
+    def _is_image(self, content: Any) -> bool:
+        """Check if content is a PIL Image."""
+        try:
+            from PIL.Image import Image as PILImage
+
+            return isinstance(content, PILImage)
+        except ImportError:
+            return False
+
+    def embed(self, content: EmbeddableContent) -> list[float]:
+        """
+        Generate embedding for a single piece of content.
+
+        Args:
+            content: Text string or PIL Image to embed.
+
+        Returns:
+            Embedding vector as list of floats.
+
+        Raises:
+            ValueError: If image passed to non-CLIP model.
+        """
+        if self._is_image(content):
+            if not self._is_clip_model():
+                msg = f"Model {self._model_name} does not support image embeddings"
+                raise ValueError(msg)
+            logger.debug("Generating image embedding with CLIP model")
+
+        # sentence-transformers CLIP models accept PIL Images via encode()
+        embedding = self.model.encode(content, convert_to_numpy=True)  # type: ignore[arg-type]
         result: list[float] = embedding.tolist()
         return result
 
-    def embed_batch(self, texts: list[str], batch_size: int = 32) -> list[list[float]]:
+    def embed_batch(  # type: ignore[override]
+        self, contents: list[EmbeddableContent], batch_size: int = 32
+    ) -> list[list[float]]:
         """
-        Generate embeddings for multiple texts.
+        Generate embeddings for multiple content items.
+
+        Supports mixed batches of text and images for CLIP models.
 
         Args:
-            texts: List of texts to embed.
+            contents: List of texts or PIL Images to embed.
             batch_size: Batch size for processing.
 
         Returns:
             List of embedding vectors.
+
+        Raises:
+            ValueError: If images passed to non-CLIP model.
         """
-        if not texts:
+        if not contents:
             return []
 
+        # Check if any images in the batch
+        has_images = any(self._is_image(c) for c in contents)
+        if has_images and not self._is_clip_model():
+            msg = f"Model {self._model_name} does not support image embeddings"
+            raise ValueError(msg)
+
+        if has_images:
+            logger.debug(
+                "Generating batch embeddings with %d items (includes images)", len(contents)
+            )
+
+        # sentence-transformers CLIP models accept PIL Images via encode()
         embeddings = self.model.encode(
-            texts,
+            contents,  # type: ignore[arg-type]
             batch_size=batch_size,
             show_progress_bar=False,
             convert_to_numpy=True,
         )
         return [emb.tolist() for emb in embeddings]
+
+    def embed_image(self, image: "PILImage") -> list[float]:  # type: ignore[no-any-unimported]
+        """
+        Generate embedding for a PIL Image.
+
+        Args:
+            image: PIL Image object to embed.
+
+        Returns:
+            Embedding vector as list of floats.
+
+        Raises:
+            ValueError: If model doesn't support images.
+        """
+        if not self._is_clip_model():
+            msg = f"Model {self._model_name} does not support image embeddings"
+            raise ValueError(msg)
+
+        logger.debug("Generating embedding for PIL Image")
+        return self.embed(image)
 
     def embed_query(self, query: str) -> list[float]:
         """
@@ -161,7 +363,9 @@ class LocalEmbeddingProvider(EmbeddingProvider):
         if "e5" in self._model_name.lower():
             documents = [f"passage: {doc}" for doc in documents]
 
-        return self.embed_batch(documents)
+        # Cast to EmbeddableContent list for type compatibility
+        contents: list[EmbeddableContent] = list(documents)
+        return self.embed_batch(contents)
 
     def similarity(self, embedding1: list[float], embedding2: list[float]) -> float:
         """
