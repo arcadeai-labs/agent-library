@@ -4,7 +4,6 @@ Verifies that parsers handle timeout, permission, and I/O errors
 gracefully, especially for cloud-synced filesystems (iCloud, Dropbox).
 """
 
-import signal
 from pathlib import Path
 from unittest.mock import patch
 
@@ -58,8 +57,6 @@ class TestSafeReadText:
         test_file.write_text("content", encoding="utf-8")
 
         def mock_read_text(*args, **kwargs):
-            # Simulate a file that hangs by raising SIGALRM
-            signal.alarm(0)  # Cancel any existing alarm
             raise FileReadTimeoutError("Simulated timeout")
 
         with (
@@ -220,18 +217,17 @@ class TestIndexingServiceErrorHandling:
         test_file = tmp_path / "slow.md"
         test_file.write_text("content", encoding="utf-8")
 
-        # Mock os.stat since it's what pathlib.Path.stat() uses internally
-        import os
+        # Patch Path.stat directly with new= to work across Python versions.
+        # Using new= preserves self-binding (functions are descriptors).
+        original_stat = Path.stat
 
-        original_os_stat = os.stat
-
-        def os_stat_side_effect(path, *args, **kwargs):
-            if str(path) == str(test_file):
+        def patched_stat(self, *args, **kwargs):
+            if str(self) == str(test_file):
                 raise TimeoutError("stat timeout")
-            return original_os_stat(path, *args, **kwargs)
+            return original_stat(self, *args, **kwargs)
 
         with (
-            patch("os.stat", side_effect=os_stat_side_effect),
+            patch.object(Path, "stat", new=patched_stat),
             pytest.raises(FileReadTimeoutError),
         ):
             service.index_file(test_file)
@@ -248,17 +244,15 @@ class TestIndexingServiceErrorHandling:
         test_file = tmp_path / "broken.md"
         test_file.write_text("content", encoding="utf-8")
 
-        import os
+        original_stat = Path.stat
 
-        original_os_stat = os.stat
-
-        def os_stat_side_effect(path, *args, **kwargs):
-            if str(path) == str(test_file):
+        def patched_stat(self, *args, **kwargs):
+            if str(self) == str(test_file):
                 raise OSError("Disk error")
-            return original_os_stat(path, *args, **kwargs)
+            return original_stat(self, *args, **kwargs)
 
         with (
-            patch("os.stat", side_effect=os_stat_side_effect),
+            patch.object(Path, "stat", new=patched_stat),
             pytest.raises(FileReadError),
         ):
             service.index_file(test_file)
