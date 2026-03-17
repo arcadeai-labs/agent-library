@@ -658,7 +658,7 @@ async def search_library_by_dates(
 
     # If end_date has no time component, set to end of day
     if end_dt.hour == 0 and end_dt.minute == 0 and end_dt.second == 0:
-        end_dt = end_dt.replace(hour=23, minute=59, second=59)
+        end_dt = end_dt.replace(hour=23, minute=59, second=59, microsecond=999999)
 
     db = get_database()
     filter_doc_ids = db.get_document_ids_in_timerange(start_dt, end_dt)

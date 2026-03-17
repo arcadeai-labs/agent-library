@@ -480,6 +480,10 @@ class Database:
         """
         Get document IDs that fall within a time range.
 
+        Uses file_mtime (actual file modification time) when available,
+        falling back to updated_at (database indexing time) for documents
+        without file_mtime.
+
         Args:
             start_date: Start of the time range (inclusive).
             end_date: End of the time range (exclusive).
@@ -487,13 +491,20 @@ class Database:
         Returns:
             List of document IDs.
         """
+        start_ts = start_date.timestamp()
+        end_ts = end_date.timestamp()
         with self.connection() as conn:
             rows = conn.execute(
                 """
                 SELECT id FROM documents
-                WHERE updated_at >= ? AND updated_at < ?
+                WHERE
+                    CASE
+                        WHEN file_mtime IS NOT NULL
+                        THEN file_mtime >= ? AND file_mtime < ?
+                        ELSE updated_at >= ? AND updated_at < ?
+                    END
                 """,
-                (start_date.isoformat(), end_date.isoformat()),
+                (start_ts, end_ts, start_date.isoformat(), end_date.isoformat()),
             ).fetchall()
             return [row["id"] for row in rows]
 
