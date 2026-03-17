@@ -4,11 +4,14 @@ PDF parser for extracting text from PDF documents.
 Uses pypdf for text extraction with optional OCR support via pytesseract.
 """
 
+import logging
 from pathlib import Path
 from typing import Any
 
-from librarian.processing.parsers.base import BaseParser
+from librarian.processing.parsers.base import BaseParser, safe_read_bytes
 from librarian.types import AssetType, ParsedDocument, Section
+
+logger = logging.getLogger(__name__)
 
 try:
     from pypdf import PdfReader
@@ -72,12 +75,21 @@ class PDFParser(BaseParser):
 
         Returns:
             ParsedDocument with extracted text and metadata.
+
+        Raises:
+            FileNotFoundError: If file doesn't exist.
+            FileReadTimeoutError: If file read times out (e.g., iCloud).
         """
         # Convert to Path if string
         if isinstance(file_path, str):
             file_path = Path(file_path)
 
-        reader = PdfReader(str(file_path))
+        # Read bytes with timeout protection (handles cloud/network filesystems)
+        pdf_bytes = safe_read_bytes(file_path)
+
+        import io
+
+        reader = PdfReader(io.BytesIO(pdf_bytes))
 
         # Extract metadata
         metadata: dict[str, Any] = {

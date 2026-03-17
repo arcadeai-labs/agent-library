@@ -31,6 +31,7 @@ from librarian.config import (
 )
 from librarian.indexing import get_indexing_service
 from librarian.processing.embed import get_embedder
+from librarian.processing.parsers.base import FileReadError, FileReadTimeoutError
 from librarian.retrieval.search import HybridSearcher
 from librarian.storage.database import get_database
 from librarian.types import AssetType, EmbeddingModality
@@ -221,7 +222,19 @@ async def index_directory_to_library(
 
             if existing and not force_reindex:
                 # Get current file modification time
-                current_mtime = file_path.stat().st_mtime
+                try:
+                    current_mtime = file_path.stat().st_mtime
+                except (OSError, TimeoutError):
+                    # Can't stat file (cloud not synced, etc.) - skip it
+                    logger.info("Skipping %s: cannot read file metadata", file_path.name)
+                    results["files"].append({
+                        "path": str(file_path),
+                        "status": "skipped",
+                        "reason": "cannot read file metadata",
+                    })
+                    results["skipped"] += 1
+                    continue
+
                 stored_mtime = existing.file_mtime
 
                 # Skip if file hasn't been modified since last index
@@ -244,6 +257,24 @@ async def index_directory_to_library(
         except ImportError as e:
             # Missing optional dependency (e.g., Pillow for images, pypdf for PDFs)
             logger.info("Skipping %s: %s", file_path.name, e)
+            results["files"].append({
+                "path": str(file_path),
+                "status": "skipped",
+                "reason": str(e),
+            })
+            results["skipped"] += 1
+        except (FileReadTimeoutError, TimeoutError) as e:
+            # File not available (iCloud not synced, network timeout, etc.)
+            logger.warning("Skipping %s: %s", file_path.name, e)
+            results["files"].append({
+                "path": str(file_path),
+                "status": "skipped",
+                "reason": f"file read timeout: {e}",
+            })
+            results["skipped"] += 1
+        except FileReadError as e:
+            # I/O error (permissions, disk issues, etc.)
+            logger.warning("Skipping %s: %s", file_path.name, e)
             results["files"].append({
                 "path": str(file_path),
                 "status": "skipped",

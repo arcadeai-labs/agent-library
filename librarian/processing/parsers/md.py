@@ -13,7 +13,7 @@ from typing import Any
 import frontmatter
 import yaml
 
-from librarian.processing.parsers.base import BaseParser
+from librarian.processing.parsers.base import BaseParser, safe_read_text
 from librarian.types import AssetType, ParsedDocument, Section
 
 logger = logging.getLogger(__name__)
@@ -49,18 +49,10 @@ class MarkdownParser(BaseParser):
 
         Raises:
             FileNotFoundError: If file doesn't exist.
+            FileReadTimeoutError: If file read times out (e.g., iCloud).
         """
         path = Path(file_path)
-        if not path.exists():
-            msg = f"File not found: {file_path}"
-            raise FileNotFoundError(msg)
-
-        try:
-            raw_content = path.read_text(encoding="utf-8")
-        except UnicodeDecodeError:
-            # Fallback for non-UTF-8 files
-            raw_content = path.read_text(encoding="latin-1")
-
+        raw_content = safe_read_text(path)
         return self.parse_content(raw_content, str(path))
 
     def parse_content(self, content: str, path: str = "") -> ParsedDocument:

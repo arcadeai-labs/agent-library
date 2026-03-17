@@ -10,7 +10,7 @@ from pathlib import Path
 from typing import Any
 
 from librarian.config import ENABLE_OCR, OCR_CONFIG, OCR_LANGUAGE, OCR_MIN_CONFIDENCE
-from librarian.processing.parsers.base import BaseParser
+from librarian.processing.parsers.base import BaseParser, safe_read_bytes
 from librarian.types import AssetType, ParsedDocument, Section
 
 logger = logging.getLogger(__name__)
@@ -83,13 +83,22 @@ class ImageParser(BaseParser):
 
         Returns:
             ParsedDocument with image metadata and EXIF data.
+
+        Raises:
+            FileNotFoundError: If file doesn't exist.
+            FileReadTimeoutError: If file read times out (e.g., iCloud).
         """
         # Convert to Path if string
         if isinstance(file_path, str):
             file_path = Path(file_path)
 
-        # Open image
-        with Image.open(file_path) as img:
+        # Read bytes with timeout protection (handles cloud/network filesystems)
+        import io
+
+        image_bytes = safe_read_bytes(file_path)
+
+        # Open image from in-memory bytes
+        with Image.open(io.BytesIO(image_bytes)) as img:
             # Extract basic metadata
             metadata: dict[str, Any] = {
                 "file_type": "image",
@@ -97,7 +106,7 @@ class ImageParser(BaseParser):
                 "mode": img.mode,
                 "width": img.width,
                 "height": img.height,
-                "size_bytes": file_path.stat().st_size,
+                "size_bytes": len(image_bytes),
             }
 
             # Extract EXIF data if available

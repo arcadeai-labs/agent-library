@@ -12,6 +12,7 @@ from typing import TYPE_CHECKING, Any
 
 from librarian.config import ENABLE_CODE_EMBEDDINGS, ENABLE_VISION_EMBEDDINGS
 from librarian.processing.embed import get_embedder, get_embedder_for_modality
+from librarian.processing.parsers.base import FileReadError, FileReadTimeoutError
 from librarian.processing.parsers.registry import get_parser_for_file
 from librarian.processing.transform.chunker import Chunker, ChunkingStrategy
 from librarian.processing.transform.code import CodeChunker, chunk_code_by_blocks
@@ -123,19 +124,19 @@ class IndexingService:
             fallback: list[list[float]] = embedder.embed_documents([c.content for c in chunks])
             return fallback
 
-    def index_file(self, file_path: Path, timeout: float = 5.0) -> dict[str, Any]:
+    def index_file(self, file_path: Path) -> dict[str, Any]:
         """
         Process and index a file (text, code, PDF, image).
 
         Args:
             file_path: Path to the file.
-            timeout: Max seconds to wait for file read (for network filesystems).
 
         Returns:
             Dictionary with indexing results including path, title, chunk count, status.
 
         Raises:
-            TimeoutError: If file read times out (e.g., iCloud not synced).
+            FileReadTimeoutError: If file read times out (e.g., iCloud not synced).
+            FileReadError: For I/O errors (permissions, etc.).
             FileNotFoundError: If file doesn't exist.
         """
         db = get_database()
@@ -143,9 +144,12 @@ class IndexingService:
         # Get file modification time for change detection
         try:
             file_mtime = file_path.stat().st_mtime
-        except (OSError, TimeoutError) as e:
-            # Re-raise with context for network/cloud filesystem issues
-            raise TimeoutError(str(file_path)) from e
+        except TimeoutError as e:
+            raise FileReadTimeoutError(
+                f"Timed out accessing {file_path} (file may not be synced from cloud storage)"
+            ) from e
+        except OSError as e:
+            raise FileReadError(f"Cannot access {file_path}: {e}") from e
 
         # Get appropriate parser from registry
         parser, asset_type = get_parser_for_file(file_path)
@@ -159,7 +163,7 @@ class IndexingService:
                 "reason": "no parser found",
             }
 
-        # Parse the document
+        # Parse the document (parsers handle their own timeout/IO errors)
         parsed = parser.parse_file(file_path)
 
         # Check if document exists for update vs insert
@@ -286,9 +290,21 @@ class IndexingService:
 
         Returns:
             True if file should be reindexed, False if unchanged.
+
+        Raises:
+            FileReadTimeoutError: If stat() times out.
+            FileReadError: For I/O errors.
         """
         db = get_database()
-        current_mtime = file_path.stat().st_mtime
+
+        try:
+            current_mtime = file_path.stat().st_mtime
+        except TimeoutError as e:
+            raise FileReadTimeoutError(
+                f"Timed out accessing {file_path} (file may not be synced from cloud storage)"
+            ) from e
+        except OSError as e:
+            raise FileReadError(f"Cannot access {file_path}: {e}") from e
 
         existing = db.get_document_by_path(str(file_path))
         if not existing:
