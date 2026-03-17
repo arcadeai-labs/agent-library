@@ -7,12 +7,22 @@ Usage:
     from librarian.processing.parsers import MarkdownParser, ObsidianParser
 """
 
-from librarian.processing.parsers.base import BaseParser
+from librarian.processing.parsers.base import (
+    BaseParser,
+    FileReadError,
+    FileReadTimeoutError,
+    safe_read_bytes,
+    safe_read_text,
+)
 from librarian.processing.parsers.md import MarkdownParser
 from librarian.processing.parsers.obsidian import ObsidianParser
 
 __all__ = [
     "BaseParser",
+    "FileReadError",
+    "FileReadTimeoutError",
     "MarkdownParser",
     "ObsidianParser",
+    "safe_read_bytes",
+    "safe_read_text",
 ]

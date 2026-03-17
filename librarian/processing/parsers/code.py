@@ -8,7 +8,7 @@ Can be extended with tree-sitter for more accurate AST parsing.
 import re
 from pathlib import Path
 
-from librarian.processing.parsers.base import BaseParser
+from librarian.processing.parsers.base import BaseParser, safe_read_text
 from librarian.types import (
     AssetType,
     CodeSymbol,
@@ -58,13 +58,17 @@ class CodeParser(BaseParser):
 
         Returns:
             ParsedDocument with extracted code structure.
+
+        Raises:
+            FileNotFoundError: If file doesn't exist.
+            FileReadTimeoutError: If file read times out (e.g., iCloud).
         """
         # Convert to Path if string
         if isinstance(file_path, str):
             file_path = Path(file_path)
 
-        # Read file
-        content = file_path.read_text(encoding="utf-8", errors="ignore")
+        # Read file with timeout protection
+        content = safe_read_text(file_path, fallback_encoding=None)
 
         # Detect language if not specified
         language = self.language or self._detect_language(file_path)
