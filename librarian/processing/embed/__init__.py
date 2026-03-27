@@ -214,8 +214,8 @@ class EmbeddingRegistry:
                 logger.info(f"Created CODE embedder with model: {CODE_EMBEDDING_MODEL}")
                 return Embedder(provider)
             except ImportError as e:
-                logger.warning(
-                    "CODE embeddings enabled but dependencies missing: %s. "
+                logger.debug(
+                    "CODE embeddings not available (optional dependency missing: %s). "
                     "Code content will use TEXT embeddings instead.",
                     e,
                 )
@@ -231,8 +231,8 @@ class EmbeddingRegistry:
                 logger.info(f"Created VISION embedder with model: {VISION_EMBEDDING_MODEL}")
                 return Embedder(provider)
             except ImportError as e:
-                logger.warning(
-                    "VISION embeddings enabled but dependencies missing: %s. "
+                logger.debug(
+                    "VISION embeddings not available (optional dependency missing: %s). "
                     "Image content will use TEXT embeddings instead.",
                     e,
                 )

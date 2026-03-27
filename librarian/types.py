@@ -106,20 +106,9 @@ class SearchMode(str, Enum):
     CROSS_MODAL = "cross_modal"
 
 
-class Timeframe(str, Enum):
-    """Timeframe filters for searches."""
-
-    TODAY = "today"
-    YESTERDAY = "yesterday"
-    THIS_WEEK = "this_week"
-    LAST_WEEK = "last_week"
-    THIS_MONTH = "this_month"
-    LAST_MONTH = "last_month"
-    LAST_7_DAYS = "last_7_days"
-    LAST_30_DAYS = "last_30_days"
-    THIS_YEAR = "this_year"
-    LAST_YEAR = "last_year"
-
+# Timeframe is canonically defined in librarian.utils.timeframe
+# Re-exported here for backward compatibility
+from librarian.utils.timeframe import Timeframe as Timeframe  # noqa: E402
 
 # =============================================================================
 # Ingested Types (from parsers)

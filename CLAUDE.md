@@ -325,10 +325,10 @@ results = searcher.keyword_search("Calculator", limit=5)
 ```
 
 ### MCP Tool Integration
-AI agents receive asset_type in all search results:
+AI agents receive asset_type in all search results via the unified `search_library` tool:
 
 ```python
-# search_library MCP tool response
+# search_library MCP tool response (all modes: hybrid, semantic, keyword)
 {
     "chunk_id": 42,
     "document_path": "/path/to/example.py",
@@ -337,16 +337,16 @@ AI agents receive asset_type in all search results:
     "score": 0.87
 }
 
-# semantic_search_library response
+# search_library with mode="semantic" and asset_type="pdf"
 {
-    "asset_type": "pdf",  # ← Also includes asset_type
+    "asset_type": "pdf",
     "document_path": "/path/to/document.pdf",
     ...
 }
 
-# keyword_search_library response
+# search_library with mode="keyword"
 {
-    "asset_type": "image",  # ← Every search tool includes it
+    "asset_type": "image",
     "document_path": "/path/to/diagram.png",
     ...
 }

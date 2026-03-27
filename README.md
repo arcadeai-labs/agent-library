@@ -97,20 +97,27 @@ See the [Arcade MCP documentation](https://docs.arcade.dev) for integration deta
 
 ### Available Tools
 
+**Core Tools** (always enabled):
+
 | Tool | Description |
 |------|-------------|
-| `Librarian_SearchLibrary` | Search the library with hybrid vector + keyword search |
-| `Librarian_SemanticSearchLibrary` | Find content by meaning (semantic similarity) |
-| `Librarian_KeywordSearchLibrary` | Find content by exact keywords |
-| `Librarian_SearchLibraryByDates` | Search within a date range |
+| `Librarian_SearchLibrary` | Unified search with mode selection (hybrid/semantic/keyword), asset type filtering, and timeframe support |
 | `Librarian_AddToLibrary` | Store new content in the library |
 | `Librarian_UpdateLibraryDoc` | Update existing content |
 | `Librarian_ReadFromLibrary` | Read full document content |
 | `Librarian_RemoveFromLibrary` | Remove content from the library |
 | `Librarian_ListLibraryContents` | List all stored content |
-| `Librarian_IndexDirectoryToLibrary` | Bulk import files |
+| `Librarian_IndexDirectoryToLibrary` | Bulk import files from a directory |
+
+**Optional Tools** (enable with `LIBRARIAN_ENABLE_OPTIONAL_TOOLS=true`):
+
+| Tool | Description |
+|------|-------------|
 | `Librarian_GetLibrarySources` | List sources with document/chunk counts |
 | `Librarian_GetLibraryStats` | Overall library statistics |
+| `Librarian_GetLibraryStructure` | Filesystem structure of library sources |
+| `Librarian_GetLibrarySections` | Simplified view of available storage locations |
+| `Librarian_SuggestLibraryLocation` | AI-powered suggestions for where to store content |
 
 ## Configuration
 

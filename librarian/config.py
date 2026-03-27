@@ -190,6 +190,20 @@ INDEX_POLL_INTERVAL = safe_float(os.getenv("INDEX_POLL_INTERVAL"), 60.0)
 INDEX_START_DELAY = safe_float(os.getenv("INDEX_START_DELAY"), 5.0)
 
 
+# =============================================================================
+# Server Configuration
+# =============================================================================
+
+SERVER_HOST = os.getenv("LIBRARIAN_HOST", "127.0.0.1")
+SERVER_PORT = safe_int(os.getenv("LIBRARIAN_PORT"), 8000)
+
+# =============================================================================
+# Optional Tools Configuration
+# =============================================================================
+
+ENABLE_OPTIONAL_TOOLS = safe_bool(os.getenv("LIBRARIAN_ENABLE_OPTIONAL_TOOLS"), True)
+
+
 def ensure_directories() -> None:
     """Ensure required directories exist."""
     Path(DATABASE_PATH).parent.mkdir(parents=True, exist_ok=True)

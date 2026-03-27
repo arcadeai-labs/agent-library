@@ -17,6 +17,7 @@ os.environ["DATABASE_PATH"] = "/tmp/librarian_test.db"  # noqa: S108
 os.environ["DOCUMENTS_PATH"] = "/tmp/librarian_test_docs"  # noqa: S108
 os.environ["EMBEDDING_PROVIDER"] = "local"  # Use local embedder in tests (384 dimensions)
 os.environ["EMBEDDING_DIMENSION"] = "384"  # Match fake embedder dimension
+os.environ["LIBRARIAN_ENABLE_OPTIONAL_TOOLS"] = "true"  # Enable all tools in tests
 
 
 class FakeEmbeddingProvider:

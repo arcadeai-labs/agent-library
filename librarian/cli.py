@@ -626,8 +626,6 @@ def add_source(
             server_ingest(
                 context=None,  # type: ignore[arg-type]
                 directory=str(source_path),
-                recursive=depth != 0,
-                force_reindex=False,
             )
         )
 
@@ -901,8 +899,6 @@ def index_build(
                 server_ingest(
                     context=None,  # type: ignore[arg-type]
                     directory=str(src_path),
-                    recursive=src.get("recursive", True),
-                    force_reindex=True,
                 )
             )
             total_indexed += result.get("indexed", 0) + result.get("updated", 0)
@@ -1209,44 +1205,41 @@ def search_cmd(
     cfg = _get_config()
     cfg["ensure_directories"]()
 
-    from librarian.server import (
-        keyword_search_library,
-        search_code,
-        search_images,
-        search_library,
-        semantic_search_library,
-    )
+    from librarian.server import search_library
+    from librarian.types import AssetType as LibAssetType
+    from librarian.types import SearchMode as LibSearchMode
 
-    # Handle specialized search modes
+    # Map CLI search mode to library SearchMode
+    mode_map = {
+        SearchMode.HYBRID: LibSearchMode.HYBRID,
+        SearchMode.VECTOR: LibSearchMode.SEMANTIC,
+        SearchMode.KEYWORD: LibSearchMode.KEYWORD,
+    }
+    lib_mode = mode_map.get(mode, LibSearchMode.HYBRID)
+
+    # Determine asset type filter
+    lib_asset_type: LibAssetType | None = None
     if code:
-        with console.status("Searching code..."):
-            results = _run_async(search_code(context=None, query=query, limit=limit))  # type: ignore[arg-type]
+        lib_asset_type = LibAssetType.CODE
     elif images:
-        with console.status("Searching images..."):
-            results = _run_async(search_images(context=None, query=query, limit=limit))  # type: ignore[arg-type]
-    else:
-        # Build asset_types filter
-        asset_types_filter: list[str] | None = None
-        if asset_type:
-            asset_types_filter = [asset_type.lower()]
+        lib_asset_type = LibAssetType.IMAGE
+    elif asset_type:
+        try:
+            lib_asset_type = LibAssetType(asset_type.lower())
+        except ValueError:
+            rprint(f"[red]Unknown asset type: {asset_type}[/red]")
+            raise typer.Exit(1) from None
 
-        with console.status("Searching..."):
-            if mode == SearchMode.VECTOR:
-                results = _run_async(
-                    semantic_search_library(context=None, query=query, limit=limit)
-                )  # type: ignore[arg-type]
-            elif mode == SearchMode.KEYWORD:
-                results = _run_async(keyword_search_library(context=None, query=query, limit=limit))  # type: ignore[arg-type]
-            else:
-                results = _run_async(
-                    search_library(
-                        context=None,
-                        query=query,
-                        limit=limit,
-                        use_mmr=True,
-                        asset_types=asset_types_filter,
-                    )
-                )  # type: ignore[arg-type]
+    with console.status("Searching..."):
+        results = _run_async(
+            search_library(
+                context=None,  # type: ignore[arg-type]
+                query=query,
+                mode=lib_mode,
+                asset_type=lib_asset_type,
+                limit=limit,
+            )
+        )
 
     # Filter by source
     if source and results:
@@ -1576,8 +1569,8 @@ def config_reset(
 @app.command("serve")
 def serve(
     transport: Annotated[str, typer.Argument(help="Transport: stdio or http")] = "stdio",
-    host: Annotated[str, typer.Option("--host", "-h", help="HTTP host")] = "127.0.0.1",
-    port: Annotated[int, typer.Option("--port", "-p", help="HTTP port")] = 8000,
+    host: Annotated[str, typer.Option("--host", "-h", help="HTTP host")] = "",
+    port: Annotated[int, typer.Option("--port", "-p", help="HTTP port")] = 0,
     log_level: Annotated[
         str, typer.Option("--log-level", help="Log level (debug, info, warning, error)")
     ] = "warning",
@@ -1585,7 +1578,12 @@ def serve(
     """Start the MCP server."""
     import logging
 
+    from librarian.config import SERVER_HOST, SERVER_PORT
     from librarian.server import app as mcp_app
+
+    # Use config defaults when CLI args are not provided
+    effective_host = host if host else SERVER_HOST
+    effective_port = port if port else SERVER_PORT
 
     level_map = {
         "debug": logging.DEBUG,
@@ -1605,9 +1603,9 @@ def serve(
         logging.getLogger("httpcore").setLevel(logging.ERROR)
     else:
         logging.basicConfig(level=log_lvl)
-        rprint(f"[green]Starting HTTP server on {host}:{port}...[/green]")
+        rprint(f"[green]Starting HTTP server on {effective_host}:{effective_port}...[/green]")
 
-    mcp_app.run(transport=transport, host=host, port=port)  # type: ignore[arg-type]
+    mcp_app.run(transport=transport, host=effective_host, port=effective_port)  # type: ignore[arg-type]
 
 
 # =============================================================================

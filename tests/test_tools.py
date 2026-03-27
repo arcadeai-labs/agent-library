@@ -20,8 +20,6 @@ class TestIngestionTools:
         result = await index_directory_to_library(
             context=CTX,
             directory=str(temp_docs_dir),
-            recursive=True,
-            force_reindex=False,
         )
 
         assert "error" not in result
@@ -36,12 +34,11 @@ class TestIngestionTools:
         result = await index_directory_to_library(
             context=CTX,
             directory="/nonexistent/path",
-            recursive=True,
-            force_reindex=False,
         )
 
         assert "error" in result
         assert result["indexed"] == 0
+        assert "suggestion" in result
 
     @pytest.mark.asyncio
     async def test_index_change_detection(self, temp_docs_dir: Path, clean_db: Path) -> None:
@@ -54,8 +51,6 @@ class TestIngestionTools:
         result1 = await index_directory_to_library(
             context=CTX,
             directory=str(temp_docs_dir),
-            recursive=True,
-            force_reindex=False,
         )
         assert "error" not in result1
         initial_indexed = result1["indexed"]
@@ -65,8 +60,6 @@ class TestIngestionTools:
         result2 = await index_directory_to_library(
             context=CTX,
             directory=str(temp_docs_dir),
-            recursive=True,
-            force_reindex=False,
         )
         assert "error" not in result2
         assert result2["indexed"] == 0
@@ -83,38 +76,10 @@ class TestIngestionTools:
         result3 = await index_directory_to_library(
             context=CTX,
             directory=str(temp_docs_dir),
-            recursive=True,
-            force_reindex=False,
         )
         assert "error" not in result3
         assert result3["updated"] == 1
         assert result3["skipped"] == result1["total_files"] - 1
-
-    @pytest.mark.asyncio
-    async def test_index_force_reindex(self, temp_docs_dir: Path, clean_db: Path) -> None:
-        """Test that force_reindex re-indexes all files."""
-        from librarian.server import index_directory_to_library
-
-        # First index
-        result1 = await index_directory_to_library(
-            context=CTX,
-            directory=str(temp_docs_dir),
-            recursive=True,
-            force_reindex=False,
-        )
-        assert "error" not in result1
-        total_files = result1["total_files"]
-
-        # Force reindex - should update all even though nothing changed
-        result2 = await index_directory_to_library(
-            context=CTX,
-            directory=str(temp_docs_dir),
-            recursive=True,
-            force_reindex=True,
-        )
-        assert "error" not in result2
-        assert result2["updated"] == total_files
-        assert result2["skipped"] == 0
 
     @pytest.mark.asyncio
     async def test_add_to_library(self, temp_docs_dir: Path, clean_db: Path) -> None:
@@ -186,48 +151,80 @@ class TestSearchTools:
     """Tests for search tools."""
 
     @pytest.mark.asyncio
-    async def test_search_library(self, temp_docs_dir: Path, clean_db: Path) -> None:
-        """Test hybrid search in the library."""
+    async def test_search_library_hybrid(self, temp_docs_dir: Path, clean_db: Path) -> None:
+        """Test hybrid search in the library (default mode)."""
         from librarian.server import index_directory_to_library, search_library
 
         await index_directory_to_library(
             context=CTX,
             directory=str(temp_docs_dir),
-            recursive=True,
-            force_reindex=True,
         )
 
         results = await search_library(context=CTX, query="test document", limit=5)
         assert isinstance(results, list)
 
     @pytest.mark.asyncio
-    async def test_semantic_search_library(self, temp_docs_dir: Path, clean_db: Path) -> None:
-        """Test pure semantic search in the library."""
-        from librarian.server import index_directory_to_library, semantic_search_library
+    async def test_search_library_semantic(self, temp_docs_dir: Path, clean_db: Path) -> None:
+        """Test semantic search mode."""
+        from librarian.server import index_directory_to_library, search_library
+        from librarian.types import SearchMode
 
         await index_directory_to_library(
             context=CTX,
             directory=str(temp_docs_dir),
-            recursive=True,
-            force_reindex=True,
         )
 
-        results = await semantic_search_library(context=CTX, query="document content", limit=5)
+        results = await search_library(
+            context=CTX, query="document content", mode=SearchMode.SEMANTIC, limit=5
+        )
         assert isinstance(results, list)
 
     @pytest.mark.asyncio
-    async def test_keyword_search_library(self, temp_docs_dir: Path, clean_db: Path) -> None:
-        """Test keyword search in the library."""
-        from librarian.server import index_directory_to_library, keyword_search_library
+    async def test_search_library_keyword(self, temp_docs_dir: Path, clean_db: Path) -> None:
+        """Test keyword search mode."""
+        from librarian.server import index_directory_to_library, search_library
+        from librarian.types import SearchMode
 
         await index_directory_to_library(
             context=CTX,
             directory=str(temp_docs_dir),
-            recursive=True,
-            force_reindex=True,
         )
 
-        results = await keyword_search_library(context=CTX, query="test", limit=5)
+        results = await search_library(context=CTX, query="test", mode=SearchMode.KEYWORD, limit=5)
+        assert isinstance(results, list)
+
+    @pytest.mark.asyncio
+    async def test_search_library_with_asset_type(
+        self, temp_docs_dir: Path, clean_db: Path
+    ) -> None:
+        """Test search with asset type filter."""
+        from librarian.server import index_directory_to_library, search_library
+        from librarian.types import AssetType
+
+        await index_directory_to_library(
+            context=CTX,
+            directory=str(temp_docs_dir),
+        )
+
+        results = await search_library(
+            context=CTX, query="test", asset_type=AssetType.TEXT, limit=5
+        )
+        assert isinstance(results, list)
+
+    @pytest.mark.asyncio
+    async def test_search_library_with_timeframe(self, temp_docs_dir: Path, clean_db: Path) -> None:
+        """Test search with timeframe filter."""
+        from librarian.server import index_directory_to_library, search_library
+        from librarian.utils.timeframe import Timeframe
+
+        await index_directory_to_library(
+            context=CTX,
+            directory=str(temp_docs_dir),
+        )
+
+        results = await search_library(
+            context=CTX, query="test", timeframe=Timeframe.THIS_YEAR, limit=5
+        )
         assert isinstance(results, list)
 
     @pytest.mark.asyncio
@@ -250,8 +247,6 @@ class TestDocumentManagementTools:
         await index_directory_to_library(
             context=CTX,
             directory=str(temp_docs_dir),
-            recursive=True,
-            force_reindex=True,
         )
 
         file_path = temp_docs_dir / "test1.md"
@@ -268,6 +263,7 @@ class TestDocumentManagementTools:
 
         result = await read_from_library(context=CTX, path="/nonexistent/file.md")
         assert "error" in result
+        assert "suggestion" in result
 
     @pytest.mark.asyncio
     async def test_remove_from_library(self, temp_docs_dir: Path, clean_db: Path) -> None:
@@ -277,8 +273,6 @@ class TestDocumentManagementTools:
         await index_directory_to_library(
             context=CTX,
             directory=str(temp_docs_dir),
-            recursive=True,
-            force_reindex=True,
         )
 
         file_path = temp_docs_dir / "test1.md"
@@ -295,8 +289,6 @@ class TestDocumentManagementTools:
         await index_directory_to_library(
             context=CTX,
             directory=str(temp_docs_dir),
-            recursive=True,
-            force_reindex=True,
         )
 
         result = await list_library_contents(context=CTX, limit=100)
