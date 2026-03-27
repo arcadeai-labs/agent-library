@@ -43,7 +43,7 @@ async def search_tools_eval() -> EvalSuite:
     )
 
     # ==========================================================================
-    # Basic Search Queries
+    # Basic Search Queries (all use unified SearchLibrary)
     # ==========================================================================
 
     suite.add_case(
@@ -91,7 +91,7 @@ async def search_tools_eval() -> EvalSuite:
     )
 
     # ==========================================================================
-    # Timeframe-based Search
+    # Timeframe-based Search (uses timeframe enum parameter)
     # ==========================================================================
 
     suite.add_case(
@@ -155,7 +155,7 @@ async def search_tools_eval() -> EvalSuite:
     )
 
     # ==========================================================================
-    # Specific Date Range Search
+    # Specific Date Range Search (uses start_date/end_date parameters)
     # ==========================================================================
 
     # Calculate realistic dates for test cases
@@ -170,7 +170,7 @@ async def search_tools_eval() -> EvalSuite:
         ),
         expected_tool_calls=[
             ExpectedMCPToolCall(
-                "Librarian_SearchLibraryByDates",
+                "Librarian_SearchLibrary",
                 {
                     "query": "sprint review",
                     "start_date": last_week_start,
@@ -190,7 +190,7 @@ async def search_tools_eval() -> EvalSuite:
         user_message="Find all documentation I stored in Q4 2025 about authentication",
         expected_tool_calls=[
             ExpectedMCPToolCall(
-                "Librarian_SearchLibraryByDates",
+                "Librarian_SearchLibrary",
                 {
                     "query": "authentication",
                     "start_date": "2025-10-01",
@@ -206,7 +206,7 @@ async def search_tools_eval() -> EvalSuite:
     )
 
     # ==========================================================================
-    # Semantic vs Keyword Search
+    # Search Mode Selection (semantic vs keyword via mode parameter)
     # ==========================================================================
 
     suite.add_case(
@@ -217,12 +217,13 @@ async def search_tools_eval() -> EvalSuite:
         ),
         expected_tool_calls=[
             ExpectedMCPToolCall(
-                "Librarian_SemanticSearchLibrary",
-                {"query": "containerization Docker"},
+                "Librarian_SearchLibrary",
+                {"query": "containerization Docker", "mode": "semantic"},
             )
         ],
         critics=[
-            SimilarityCritic(critic_field="query", weight=1.0),
+            SimilarityCritic(critic_field="query", weight=0.7),
+            BinaryCritic(critic_field="mode", weight=0.3),
         ],
     )
 
@@ -231,12 +232,13 @@ async def search_tools_eval() -> EvalSuite:
         user_message="Search for the exact term 'JIRA-1234' in my library",
         expected_tool_calls=[
             ExpectedMCPToolCall(
-                "Librarian_KeywordSearchLibrary",
-                {"query": "JIRA-1234"},
+                "Librarian_SearchLibrary",
+                {"query": "JIRA-1234", "mode": "keyword"},
             )
         ],
         critics=[
-            BinaryCritic(critic_field="query", weight=1.0),
+            BinaryCritic(critic_field="query", weight=0.7),
+            BinaryCritic(critic_field="mode", weight=0.3),
         ],
     )
 
@@ -368,9 +370,7 @@ async def document_management_eval() -> EvalSuite:
 
     suite.add_case(
         name="Remove from index only",
-        user_message=(
-            "Remove /old/archive.md from my library search but keep the file on disk"
-        ),
+        user_message=("Remove /old/archive.md from my library search but keep the file on disk"),
         expected_tool_calls=[
             ExpectedMCPToolCall(
                 "Librarian_RemoveFromLibrary",
@@ -422,68 +422,35 @@ async def ingestion_eval() -> EvalSuite:
     # ==========================================================================
 
     suite.add_case(
-        name="Index default directory",
-        user_message="Add all my documents to the library",
-        expected_tool_calls=[
-            ExpectedMCPToolCall(
-                "Librarian_IndexDirectoryToLibrary",
-                {"recursive": True},
-            )
-        ],
-        critics=[
-            BinaryCritic(critic_field="recursive", weight=1.0),
-        ],
-    )
-
-    suite.add_case(
         name="Index specific directory",
         user_message="Add all files from /projects/documentation to my library",
         expected_tool_calls=[
             ExpectedMCPToolCall(
                 "Librarian_IndexDirectoryToLibrary",
-                {"directory": "/projects/documentation", "recursive": True},
+                {"directory": "/projects/documentation"},
             )
         ],
         critics=[
-            BinaryCritic(critic_field="directory", weight=0.6),
-            BinaryCritic(critic_field="recursive", weight=0.4),
+            BinaryCritic(critic_field="directory", weight=1.0),
         ],
     )
 
     suite.add_case(
-        name="Force reindex",
-        user_message="Re-index everything in /notes even if already in my library",
+        name="Index notes directory",
+        user_message="Index everything in /notes into my library",
         expected_tool_calls=[
             ExpectedMCPToolCall(
                 "Librarian_IndexDirectoryToLibrary",
-                {"directory": "/notes", "force_reindex": True},
+                {"directory": "/notes"},
             )
         ],
         critics=[
-            BinaryCritic(critic_field="directory", weight=0.5),
-            BinaryCritic(critic_field="force_reindex", weight=0.5),
-        ],
-    )
-
-    suite.add_case(
-        name="Non-recursive ingestion",
-        user_message=(
-            "Add only the top-level files in /archive to my library, not subdirectories"
-        ),
-        expected_tool_calls=[
-            ExpectedMCPToolCall(
-                "Librarian_IndexDirectoryToLibrary",
-                {"directory": "/archive", "recursive": False},
-            )
-        ],
-        critics=[
-            BinaryCritic(critic_field="directory", weight=0.5),
-            BinaryCritic(critic_field="recursive", weight=0.5),
+            BinaryCritic(critic_field="directory", weight=1.0),
         ],
     )
 
     # ==========================================================================
-    # Stats
+    # Stats (optional tools - enabled in evals)
     # ==========================================================================
 
     suite.add_case(
@@ -550,37 +517,32 @@ async def complex_workflows_eval() -> EvalSuite:
     )
 
     suite.add_case(
-        name="Diverse results request",
-        user_message=(
-            "Search my library for diverse perspectives on the architecture decision"
-        ),
+        name="Search code assets",
+        user_message="Find authentication code in my library",
         expected_tool_calls=[
             ExpectedMCPToolCall(
                 "Librarian_SearchLibrary",
-                {"query": "architecture decision", "use_mmr": True},
+                {"query": "authentication", "asset_type": "code"},
             )
         ],
         critics=[
             SimilarityCritic(critic_field="query", weight=0.6),
-            BinaryCritic(critic_field="use_mmr", weight=0.4),
+            BinaryCritic(critic_field="asset_type", weight=0.4),
         ],
     )
 
     suite.add_case(
-        name="Keyword-heavy search",
-        user_message="Search my library for exact keyword matches, not similar concepts",
-        additional_messages=[
-            {"role": "user", "content": "Search for 'kubernetes deployment yaml'"},
-        ],
+        name="Search PDFs only",
+        user_message="Search my PDF documents for information about the contract terms",
         expected_tool_calls=[
             ExpectedMCPToolCall(
                 "Librarian_SearchLibrary",
-                {"query": "kubernetes deployment yaml", "hybrid_alpha": 0.0},
+                {"query": "contract terms", "asset_type": "pdf"},
             )
         ],
         critics=[
             SimilarityCritic(critic_field="query", weight=0.6),
-            NumericCritic(critic_field="hybrid_alpha", value_range=(0.0, 0.3), weight=0.4),
+            BinaryCritic(critic_field="asset_type", weight=0.4),
         ],
     )
 
@@ -595,7 +557,8 @@ async def multimodal_eval() -> EvalSuite:
         system_message=(
             "You are a helpful assistant with access to a personal knowledge library. "
             "The library supports multiple asset types: text, code, PDFs, and images. "
-            "Search results include asset_type to distinguish file types."
+            "Use the SearchLibrary tool with the 'mode' parameter for semantic or keyword "
+            "search, and 'asset_type' to filter by content type."
         ),
         rubric=EvalRubric(fail_threshold=0.7, warn_threshold=0.85),
     )
@@ -620,35 +583,35 @@ async def multimodal_eval() -> EvalSuite:
         critics=[
             SimilarityCritic(critic_field="query", weight=1.0),
         ],
-        # Note: Critics don't validate response structure, but the tool
-        # should return asset_type field in results
     )
 
     suite.add_case(
-        name="Semantic search returns asset_type",
-        user_message="Find conceptually similar content about data structures",
+        name="Semantic search via mode parameter",
+        user_message="Find conceptually similar content about data structures in my library",
         expected_tool_calls=[
             ExpectedMCPToolCall(
-                "Librarian_SemanticSearchLibrary",
-                {"query": "data structures"},
+                "Librarian_SearchLibrary",
+                {"query": "data structures", "mode": "semantic"},
             )
         ],
         critics=[
-            SimilarityCritic(critic_field="query", weight=1.0),
+            SimilarityCritic(critic_field="query", weight=0.7),
+            BinaryCritic(critic_field="mode", weight=0.3),
         ],
     )
 
     suite.add_case(
-        name="Keyword search returns asset_type",
+        name="Keyword search via mode parameter",
         user_message="Search for the exact keyword 'Calculator' in my library",
         expected_tool_calls=[
             ExpectedMCPToolCall(
-                "Librarian_KeywordSearchLibrary",
-                {"query": "Calculator"},
+                "Librarian_SearchLibrary",
+                {"query": "Calculator", "mode": "keyword"},
             )
         ],
         critics=[
-            BinaryCritic(critic_field="query", weight=1.0),
+            BinaryCritic(critic_field="query", weight=0.7),
+            BinaryCritic(critic_field="mode", weight=0.3),
         ],
     )
 
@@ -658,26 +621,26 @@ async def multimodal_eval() -> EvalSuite:
         expected_tool_calls=[
             ExpectedMCPToolCall(
                 "Librarian_IndexDirectoryToLibrary",
-                {"directory": "/projects/api-server", "recursive": True},
+                {"directory": "/projects/api-server"},
             )
         ],
         critics=[
-            BinaryCritic(critic_field="directory", weight=0.6),
-            BinaryCritic(critic_field="recursive", weight=0.4),
+            BinaryCritic(critic_field="directory", weight=1.0),
         ],
     )
 
     suite.add_case(
-        name="Search with code-specific query",
-        user_message="Find authentication functions in my code",
+        name="Search with code asset type filter",
+        user_message="Find authentication functions in my code files",
         expected_tool_calls=[
             ExpectedMCPToolCall(
                 "Librarian_SearchLibrary",
-                {"query": "authentication functions"},
+                {"query": "authentication functions", "asset_type": "code"},
             )
         ],
         critics=[
-            SimilarityCritic(critic_field="query", weight=1.0),
+            SimilarityCritic(critic_field="query", weight=0.6),
+            BinaryCritic(critic_field="asset_type", weight=0.4),
         ],
     )
 
