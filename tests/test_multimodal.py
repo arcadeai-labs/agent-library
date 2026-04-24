@@ -338,3 +338,113 @@ class TestMultiModalSearch:
             assert len(results) > 0
             for result in results:
                 assert result.asset_type == AssetType.CODE
+
+
+class TestMultiModalScoring:
+    """Lock in the scoring contract for _merge_multi_modal_results.
+
+    Regression: scores used to be divided by the total weight of all
+    enabled modalities, pinning single-modality hits at 1/N (the observed
+    0.25 ceiling when four modalities were active). Scores must now span
+    a usable range with single-modality best hits near 1.0 and cross-modal
+    agreement scored slightly above single-modality alternatives.
+    """
+
+    def _merge(self, search, modality_results):  # type: ignore[no-untyped-def]
+        """Invoke _merge_multi_modal_results with synthetic per-modality results."""
+        return search._merge_multi_modal_results(modality_results)
+
+    def _mk(self, chunk_id, score, asset_type=AssetType.TEXT):  # type: ignore[no-untyped-def]
+        from librarian.types import SearchResult
+
+        return SearchResult(
+            chunk_id=chunk_id,
+            document_id=chunk_id,
+            document_path=f"/doc/{chunk_id}",
+            content="",
+            heading_path=None,
+            score=score,
+            asset_type=asset_type,
+        )
+
+    def test_single_modality_hit_is_not_diluted(self, clean_db, fake_embedder) -> None:  # type: ignore[no-untyped-def]
+        """A chunk matched only in FTS should score ~1.0, not 1/num_modalities."""
+        from librarian.retrieval.search import HybridSearcher
+
+        search = HybridSearcher(embedder=fake_embedder)
+        merged = self._merge(
+            search,
+            {
+                "text": [self._mk(100, 0.5)],
+                "code": [self._mk(200, 0.5)],
+                "vision": [self._mk(300, 0.5)],
+                "fts": [self._mk(1, 10.0)],  # raw score doesn't matter; normalized to 1.0
+            },
+        )
+        winner = next(r for r in merged if r.chunk_id == 1)
+        assert winner.score == pytest.approx(1.0, abs=1e-6)
+
+    def test_cross_modal_agreement_ranks_above_single_match(self, clean_db, fake_embedder) -> None:  # type: ignore[no-untyped-def]
+        """A chunk matched in two modalities should outrank equally-scored single-match chunks."""
+        from librarian.retrieval.search import HybridSearcher
+
+        search = HybridSearcher(embedder=fake_embedder)
+        merged = self._merge(
+            search,
+            {
+                # Chunk 1: matches both text and FTS at their modality-best
+                "text": [self._mk(1, 1.0), self._mk(2, 1.0)],
+                "fts": [self._mk(1, 10.0), self._mk(3, 10.0)],
+            },
+        )
+        by_id = {r.chunk_id: r.score for r in merged}
+        # 1 appears in both modalities: 1.0 * (1 + 0.05) clamped to 1.0
+        # 2 appears only in text: 1.0 * 1.0 = 1.0
+        # 3 appears only in FTS: 1.0 * 1.0 = 1.0
+        # All cap at 1.0 — the overlap bonus matters more at non-max scores.
+        assert by_id[1] >= by_id[2]
+        assert by_id[1] >= by_id[3]
+
+    def test_overlap_bonus_lifts_multi_match_at_mid_scores(self, clean_db, fake_embedder) -> None:  # type: ignore[no-untyped-def]
+        """At non-saturating normalized scores, cross-modal agreement outranks single-match.
+
+        Per-modality normalization divides each chunk's raw score by the
+        modality's max, so to exercise the overlap bonus we need the
+        matched-in-both chunk to be *below* its modality's max.
+        """
+        from librarian.retrieval.search import HybridSearcher
+
+        search = HybridSearcher(embedder=fake_embedder)
+        merged = self._merge(
+            search,
+            {
+                # text max=10; chunk 1 → 0.8 normalized; chunk 2 → 0.8 normalized
+                "text": [self._mk(1, 8.0), self._mk(2, 8.0), self._mk(0, 10.0)],
+                # fts max=10; chunk 1 → 0.8 normalized; chunk 3 → 1.0 normalized
+                "fts": [self._mk(1, 8.0), self._mk(3, 10.0)],
+            },
+        )
+        by_id = {r.chunk_id: r.score for r in merged}
+        # chunk 1 in both modalities @ 0.8 each: avg=0.8 * bonus=1.05 → 0.84
+        # chunk 2 in text only @ 0.8: avg=0.8 * 1.0 → 0.80
+        assert by_id[1] > by_id[2]
+        assert by_id[1] == pytest.approx(0.84, abs=1e-3)
+        assert by_id[2] == pytest.approx(0.80, abs=1e-3)
+
+    def test_scores_stay_bounded_in_unit_interval(self, clean_db, fake_embedder) -> None:  # type: ignore[no-untyped-def]
+        """No score should exceed 1.0 even with four-way cross-modal agreement."""
+        from librarian.retrieval.search import HybridSearcher
+
+        search = HybridSearcher(embedder=fake_embedder)
+        merged = self._merge(
+            search,
+            {
+                "text": [self._mk(1, 1.0)],
+                "code": [self._mk(1, 1.0)],
+                "vision": [self._mk(1, 1.0)],
+                "fts": [self._mk(1, 10.0)],
+            },
+        )
+        assert all(0.0 <= r.score <= 1.0 for r in merged)
+        winner = next(r for r in merged if r.chunk_id == 1)
+        assert winner.score == pytest.approx(1.0, abs=1e-6)

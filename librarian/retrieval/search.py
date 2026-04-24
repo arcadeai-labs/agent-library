@@ -319,22 +319,22 @@ class HybridSearcher:
                 elif modality == "text":
                     combined[chunk_id].vector_score = r.vector_score
 
-        # Calculate final scores with fair weighting
-        # Each modality contributes equally, and chunks in multiple modalities get boosted
-        enabled_modalities = list(modality_results.keys())
-        total_weight = sum(modality_weights.get(m, 1.0) for m in enabled_modalities)
-
+        # Score each chunk on the modalities it actually matched. Dividing by
+        # the total weight of *all* enabled modalities (the previous approach)
+        # pinned every single-modality hit to 1/N — the observed 0.25 ceiling
+        # when all four modalities were enabled. Chunks that agree across
+        # multiple modalities get a small overlap bonus.
         for chunk_id, result in combined.items():
             scores = chunk_modality_scores.get(chunk_id, {})
+            if not scores:
+                result.score = 0.0
+                continue
 
-            # Weighted average of normalized scores
-            weighted_sum = 0.0
-            for modality, norm_score in scores.items():
-                weight = modality_weights.get(modality, 1.0)
-                weighted_sum += norm_score * weight
-
-            # Divide by total possible weight (so missing modalities reduce score)
-            result.score = weighted_sum / total_weight if total_weight > 0 else 0.0
+            present_weight = sum(modality_weights.get(m, 1.0) for m in scores)
+            weighted_sum = sum(norm * modality_weights.get(m, 1.0) for m, norm in scores.items())
+            avg = weighted_sum / present_weight
+            overlap_bonus = 1.0 + 0.05 * (len(scores) - 1)
+            result.score = min(1.0, avg * overlap_bonus)
 
         # Sort by combined score
         results = sorted(combined.values(), key=lambda x: x.score, reverse=True)

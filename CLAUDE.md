@@ -120,7 +120,7 @@ All components use strongly-typed enums:
 - `EmbeddingModality`: TEXT, CODE, VISION, HYBRID
 - `ProgrammingLanguage`: 18 supported languages (PYTHON, JAVASCRIPT, etc.)
 - `CodeSymbolType`: FUNCTION, CLASS, METHOD, VARIABLE, etc.
-- `SearchMode`: HYBRID, SEMANTIC, KEYWORD, CROSS_MODAL
+- `SearchMode`: HYBRID, SEMANTIC, KEYWORD
 
 ### Document Processing (`librarian/processing/`)
 1. **Parsers** (`parsers/`):

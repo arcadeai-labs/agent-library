@@ -39,7 +39,8 @@ async def search_tools_eval() -> EvalSuite:
 
     # Load tools from the MCP server
     await suite.add_mcp_stdio_server(
-        command=["uv", "run", "librarian/server.py", "stdio"],
+        command=["uv", "run", "python", "-m", "librarian.server", "stdio"],
+        env={"LIBRARIAN_ENABLE_OPTIONAL_TOOLS": "false"},
     )
 
     # ==========================================================================
@@ -222,8 +223,10 @@ async def search_tools_eval() -> EvalSuite:
             )
         ],
         critics=[
-            SimilarityCritic(critic_field="query", weight=0.7),
-            BinaryCritic(critic_field="mode", weight=0.3),
+            # The mode choice is the actual subject of this case; the query
+            # text is incidental, so mode gets the heavier weight.
+            SimilarityCritic(critic_field="query", weight=0.4),
+            BinaryCritic(critic_field="mode", weight=0.6),
         ],
     )
 
@@ -237,8 +240,8 @@ async def search_tools_eval() -> EvalSuite:
             )
         ],
         critics=[
-            BinaryCritic(critic_field="query", weight=0.7),
-            BinaryCritic(critic_field="mode", weight=0.3),
+            BinaryCritic(critic_field="query", weight=0.4),
+            BinaryCritic(critic_field="mode", weight=0.6),
         ],
     )
 
@@ -259,7 +262,8 @@ async def document_management_eval() -> EvalSuite:
     )
 
     await suite.add_mcp_stdio_server(
-        command=["uv", "run", "librarian/server.py", "stdio"],
+        command=["uv", "run", "python", "-m", "librarian.server", "stdio"],
+        env={"LIBRARIAN_ENABLE_OPTIONAL_TOOLS": "false"},
     )
 
     # ==========================================================================
@@ -398,6 +402,48 @@ async def document_management_eval() -> EvalSuite:
         ],
     )
 
+    # Store to an explicit directory — covers a path the model must lift from
+    # the user message rather than defaulting.
+    suite.add_case(
+        name="Store note to explicit directory",
+        user_message=(
+            "Save a note called 'deploy-plan' into /Users/me/work-notes/deploys "
+            "with the content: '# Deploy Plan\n\nStage 1: canary'"
+        ),
+        expected_tool_calls=[
+            ExpectedMCPToolCall(
+                "Librarian_AddToLibrary",
+                {
+                    "title": "deploy-plan",
+                    "content": "# Deploy Plan\n\nStage 1: canary",
+                    "directory": "/Users/me/work-notes/deploys",
+                },
+            )
+        ],
+        critics=[
+            BinaryCritic(critic_field="title", weight=0.3),
+            SimilarityCritic(critic_field="content", weight=0.2),
+            BinaryCritic(critic_field="directory", weight=0.5),
+        ],
+    )
+
+    # Remove without mentioning file deletion — model should leave delete_file
+    # at the default (False), so we assert the tool + path and do NOT assert
+    # delete_file (the auto-NoneCritic will cover the unchecked field).
+    suite.add_case(
+        name="Remove without mentioning file deletion",
+        user_message="Take /archive/old-spec.md out of my library index",
+        expected_tool_calls=[
+            ExpectedMCPToolCall(
+                "Librarian_RemoveFromLibrary",
+                {"path": "/archive/old-spec.md"},
+            )
+        ],
+        critics=[
+            BinaryCritic(critic_field="path", weight=1.0),
+        ],
+    )
+
     return suite
 
 
@@ -413,8 +459,13 @@ async def ingestion_eval() -> EvalSuite:
         rubric=EvalRubric(fail_threshold=0.7, warn_threshold=0.85),
     )
 
+    # This suite tests the optional GetLibraryStats + GetLibrarySources tools
+    # alongside the core IndexDirectoryToLibrary tool, so optional tools must
+    # be enabled here (unlike the other suites, which disable them to keep
+    # tool-selection unambiguous between direct actions and workflow helpers).
     await suite.add_mcp_stdio_server(
-        command=["uv", "run", "librarian/server.py", "stdio"],
+        command=["uv", "run", "python", "-m", "librarian.server", "stdio"],
+        env={"LIBRARIAN_ENABLE_OPTIONAL_TOOLS": "true"},
     )
 
     # ==========================================================================
@@ -494,7 +545,8 @@ async def complex_workflows_eval() -> EvalSuite:
     )
 
     await suite.add_mcp_stdio_server(
-        command=["uv", "run", "librarian/server.py", "stdio"],
+        command=["uv", "run", "python", "-m", "librarian.server", "stdio"],
+        env={"LIBRARIAN_ENABLE_OPTIONAL_TOOLS": "false"},
     )
 
     # ==========================================================================
@@ -564,7 +616,8 @@ async def multimodal_eval() -> EvalSuite:
     )
 
     await suite.add_mcp_stdio_server(
-        command=["uv", "run", "librarian/server.py", "stdio"],
+        command=["uv", "run", "python", "-m", "librarian.server", "stdio"],
+        env={"LIBRARIAN_ENABLE_OPTIONAL_TOOLS": "false"},
     )
 
     # ==========================================================================
@@ -595,8 +648,8 @@ async def multimodal_eval() -> EvalSuite:
             )
         ],
         critics=[
-            SimilarityCritic(critic_field="query", weight=0.7),
-            BinaryCritic(critic_field="mode", weight=0.3),
+            SimilarityCritic(critic_field="query", weight=0.4),
+            BinaryCritic(critic_field="mode", weight=0.6),
         ],
     )
 
@@ -610,8 +663,8 @@ async def multimodal_eval() -> EvalSuite:
             )
         ],
         critics=[
-            BinaryCritic(critic_field="query", weight=0.7),
-            BinaryCritic(critic_field="mode", weight=0.3),
+            BinaryCritic(critic_field="query", weight=0.4),
+            BinaryCritic(critic_field="mode", weight=0.6),
         ],
     )
 
@@ -641,6 +694,377 @@ async def multimodal_eval() -> EvalSuite:
         critics=[
             SimilarityCritic(critic_field="query", weight=0.6),
             BinaryCritic(critic_field="asset_type", weight=0.4),
+        ],
+    )
+
+    return suite
+
+
+@tool_eval()
+async def adversarial_eval() -> EvalSuite:
+    """Adversarial coverage: ambiguous phrasings, boundary values, mode/asset-type
+    inference, date-range parsing, and tool-selection traps.
+
+    Looser rubric (fail=0.6, warn=0.75) is intentional: these cases are designed
+    to expose weak spots, not to enforce 100% pass rates.
+    """
+    suite = EvalSuite(
+        name="Library Adversarial Coverage",
+        system_message=(
+            "You are a helpful assistant with access to a personal knowledge library. "
+            "Choose the right tool and arguments for each request. Prefer direct "
+            "action tools over discovery/workflow tools when the user's intent is "
+            "clear."
+        ),
+        rubric=EvalRubric(fail_threshold=0.6, warn_threshold=0.75),
+    )
+
+    # Keep the tool surface constrained to the 7 core tools so tool selection
+    # isn't diluted by the optional workflow helpers.
+    await suite.add_mcp_stdio_server(
+        command=["uv", "run", "python", "-m", "librarian.server", "stdio"],
+        env={"LIBRARIAN_ENABLE_OPTIONAL_TOOLS": "false"},
+    )
+
+    # ==========================================================================
+    # Block A — Tool selection under ambiguity
+    # ==========================================================================
+
+    suite.add_case(
+        name="List everything I have",
+        user_message="List everything I have in my library",
+        expected_tool_calls=[
+            ExpectedMCPToolCall("Librarian_ListLibraryContents", {}),
+        ],
+        critics=[],  # Tool-selection correctness is enforced by the rubric.
+    )
+
+    suite.add_case(
+        name="Binary presence check via read",
+        user_message="Is /tmp/notes.md in my library?",
+        expected_tool_calls=[
+            ExpectedMCPToolCall(
+                "Librarian_ReadFromLibrary",
+                {"path": "/tmp/notes.md"},
+            )
+        ],
+        critics=[
+            BinaryCritic(critic_field="path", weight=1.0),
+        ],
+    )
+
+    suite.add_case(
+        name="Search inside an indexed folder",
+        user_message=(
+            "I want to see what's in the api-server folder I indexed "
+            "— anything about rate limiting?"
+        ),
+        expected_tool_calls=[
+            ExpectedMCPToolCall(
+                "Librarian_SearchLibrary",
+                {"query": "rate limiting api-server"},
+            )
+        ],
+        critics=[
+            # Threshold loosened; phrasing of the query will vary.
+            SimilarityCritic(
+                critic_field="query", weight=1.0, similarity_threshold=0.5
+            ),
+        ],
+    )
+
+    suite.add_case(
+        name="Unindex jargon",
+        user_message="Unindex /old/archive.md from my library",
+        expected_tool_calls=[
+            ExpectedMCPToolCall(
+                "Librarian_RemoveFromLibrary",
+                {"path": "/old/archive.md", "delete_file": False},
+            )
+        ],
+        critics=[
+            BinaryCritic(critic_field="path", weight=0.5),
+            BinaryCritic(critic_field="delete_file", weight=0.5),
+        ],
+    )
+
+    suite.add_case(
+        name="Permanent-delete slang",
+        user_message="Nuke /temp/scratch.md from orbit",
+        expected_tool_calls=[
+            ExpectedMCPToolCall(
+                "Librarian_RemoveFromLibrary",
+                {"path": "/temp/scratch.md", "delete_file": True},
+            )
+        ],
+        critics=[
+            BinaryCritic(critic_field="path", weight=0.5),
+            BinaryCritic(critic_field="delete_file", weight=0.5),
+        ],
+    )
+
+    # ==========================================================================
+    # Block B — Mode inference
+    # ==========================================================================
+
+    suite.add_case(
+        name="Semantic phrasing — conceptually similar",
+        user_message="Find notes conceptually similar to 'distributed consensus'",
+        expected_tool_calls=[
+            ExpectedMCPToolCall(
+                "Librarian_SearchLibrary",
+                {"query": "distributed consensus", "mode": "semantic"},
+            )
+        ],
+        critics=[
+            SimilarityCritic(critic_field="query", weight=0.4),
+            BinaryCritic(critic_field="mode", weight=0.6),
+        ],
+    )
+
+    suite.add_case(
+        name="Keyword phrasing — literal string",
+        user_message="Find notes that literally contain the string 'TODO(spartee)'",
+        expected_tool_calls=[
+            ExpectedMCPToolCall(
+                "Librarian_SearchLibrary",
+                {"query": "TODO(spartee)", "mode": "keyword"},
+            )
+        ],
+        critics=[
+            # Exact-string — BinaryCritic, not SimilarityCritic, because the
+            # whole point is that the model preserves the exact token.
+            BinaryCritic(critic_field="query", weight=0.4),
+            BinaryCritic(critic_field="mode", weight=0.6),
+        ],
+    )
+
+    suite.add_case(
+        name="Hybrid default — best overall match",
+        user_message="Search my library for budget forecasting — best overall match",
+        expected_tool_calls=[
+            ExpectedMCPToolCall(
+                "Librarian_SearchLibrary",
+                {"query": "budget forecasting"},
+            )
+        ],
+        critics=[
+            # Intentionally no mode critic: either omitting mode (defaults to
+            # hybrid) or passing mode="hybrid" is acceptable.
+            SimilarityCritic(critic_field="query", weight=1.0),
+        ],
+    )
+
+    suite.add_case(
+        name="Keyword phrasing — exact phrase",
+        user_message="I know the exact phrase — find 'eventual consistency' in my library",
+        expected_tool_calls=[
+            ExpectedMCPToolCall(
+                "Librarian_SearchLibrary",
+                {"query": "eventual consistency", "mode": "keyword"},
+            )
+        ],
+        critics=[
+            SimilarityCritic(critic_field="query", weight=0.4),
+            BinaryCritic(critic_field="mode", weight=0.6),
+        ],
+    )
+
+    # ==========================================================================
+    # Block C — Asset-type inference
+    # ==========================================================================
+
+    suite.add_case(
+        name="Infer asset_type=code from language cue",
+        user_message="Find Python code dealing with JWT parsing",
+        expected_tool_calls=[
+            ExpectedMCPToolCall(
+                "Librarian_SearchLibrary",
+                {"query": "JWT parsing", "asset_type": "code"},
+            )
+        ],
+        critics=[
+            SimilarityCritic(critic_field="query", weight=0.4),
+            BinaryCritic(critic_field="asset_type", weight=0.6),
+        ],
+    )
+
+    suite.add_case(
+        name="Infer asset_type=image from 'diagrams'",
+        user_message="Any diagrams explaining the auth flow?",
+        expected_tool_calls=[
+            ExpectedMCPToolCall(
+                "Librarian_SearchLibrary",
+                {"query": "auth flow", "asset_type": "image"},
+            )
+        ],
+        critics=[
+            SimilarityCritic(critic_field="query", weight=0.4),
+            BinaryCritic(critic_field="asset_type", weight=0.6),
+        ],
+    )
+
+    suite.add_case(
+        name="Infer asset_type=pdf from 'PDFs'",
+        user_message="Look through my PDFs for the SLA clause",
+        expected_tool_calls=[
+            ExpectedMCPToolCall(
+                "Librarian_SearchLibrary",
+                {"query": "SLA clause", "asset_type": "pdf"},
+            )
+        ],
+        critics=[
+            SimilarityCritic(critic_field="query", weight=0.4),
+            BinaryCritic(critic_field="asset_type", weight=0.6),
+        ],
+    )
+
+    # ==========================================================================
+    # Block D — Timeframe / date-range parsing
+    # ==========================================================================
+
+    suite.add_case(
+        name="Timeframe: today",
+        user_message="Show me any notes from today",
+        expected_tool_calls=[
+            ExpectedMCPToolCall(
+                "Librarian_SearchLibrary",
+                {"query": "notes", "timeframe": "today"},
+            )
+        ],
+        critics=[
+            SimilarityCritic(critic_field="query", weight=0.3),
+            BinaryCritic(critic_field="timeframe", weight=0.7),
+        ],
+    )
+
+    suite.add_case(
+        name="Custom date range — explicit",
+        user_message="What did I write between March 1 and March 15, 2026?",
+        expected_tool_calls=[
+            ExpectedMCPToolCall(
+                "Librarian_SearchLibrary",
+                {
+                    "query": "notes",
+                    "start_date": "2026-03-01",
+                    "end_date": "2026-03-15",
+                },
+            )
+        ],
+        critics=[
+            # The query text will vary ('notes', 'things', 'wrote' etc.) —
+            # low weight. The dates carry the signal.
+            SimilarityCritic(
+                critic_field="query", weight=0.2, similarity_threshold=0.3
+            ),
+            DatetimeCritic(
+                critic_field="start_date", weight=0.4, tolerance=timedelta(hours=1)
+            ),
+            DatetimeCritic(
+                critic_field="end_date", weight=0.4, tolerance=timedelta(hours=1)
+            ),
+        ],
+    )
+
+    suite.add_case(
+        name="Timeframe: last_30_days",
+        user_message="Anything from the last 30 days about onboarding?",
+        expected_tool_calls=[
+            ExpectedMCPToolCall(
+                "Librarian_SearchLibrary",
+                {"query": "onboarding", "timeframe": "last_30_days"},
+            )
+        ],
+        critics=[
+            SimilarityCritic(critic_field="query", weight=0.3),
+            BinaryCritic(critic_field="timeframe", weight=0.7),
+        ],
+    )
+
+    # 'Last Thursday' has no clean enum value — the model should synthesize
+    # a single-day custom range, or (acceptable fallback) use `last_7_days`.
+    # We only critic the query; tool selection alone is the primary signal.
+    suite.add_case(
+        name="Ambiguous relative date — last Thursday",
+        user_message="Show me notes from last Thursday about the deploy",
+        expected_tool_calls=[
+            ExpectedMCPToolCall(
+                "Librarian_SearchLibrary",
+                {"query": "deploy"},
+            )
+        ],
+        critics=[
+            SimilarityCritic(
+                critic_field="query", weight=1.0, similarity_threshold=0.5
+            ),
+        ],
+    )
+
+    # ==========================================================================
+    # Block E — Limit / boundary values (NumericCritic)
+    # ==========================================================================
+
+    suite.add_case(
+        name="Limit: top result only",
+        user_message="Just the top result for 'retry policy'",
+        expected_tool_calls=[
+            ExpectedMCPToolCall(
+                "Librarian_SearchLibrary",
+                {"query": "retry policy", "limit": 1},
+            )
+        ],
+        critics=[
+            SimilarityCritic(critic_field="query", weight=0.5),
+            NumericCritic(critic_field="limit", weight=0.5, value_range=(1, 2)),
+        ],
+    )
+
+    suite.add_case(
+        name="Limit: explicit large number",
+        user_message="Give me all 50 hits for 'deploy'",
+        expected_tool_calls=[
+            ExpectedMCPToolCall(
+                "Librarian_SearchLibrary",
+                {"query": "deploy", "limit": 50},
+            )
+        ],
+        critics=[
+            SimilarityCritic(critic_field="query", weight=0.3),
+            NumericCritic(critic_field="limit", weight=0.7, value_range=(40, 50)),
+        ],
+    )
+
+    suite.add_case(
+        name="Limit: fuzzy quantifier ('a few')",
+        user_message="Show me a few articles about k8s",
+        expected_tool_calls=[
+            ExpectedMCPToolCall(
+                "Librarian_SearchLibrary",
+                {"query": "k8s", "limit": 5},
+            )
+        ],
+        critics=[
+            SimilarityCritic(critic_field="query", weight=0.4),
+            # 'A few' has wide tolerance; anything in 3-10 is reasonable.
+            NumericCritic(critic_field="limit", weight=0.6, value_range=(3, 10)),
+        ],
+    )
+
+    # ==========================================================================
+    # Block F — Adversarial phrasings that tempt the wrong tool
+    # ==========================================================================
+
+    suite.add_case(
+        name="Add with minimal content cue",
+        user_message="Add 'foobar' to my library",
+        expected_tool_calls=[
+            ExpectedMCPToolCall(
+                "Librarian_AddToLibrary",
+                {"title": "foobar"},
+            )
+        ],
+        critics=[
+            BinaryCritic(critic_field="title", weight=1.0),
         ],
     )
 
