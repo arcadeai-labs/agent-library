@@ -7,8 +7,12 @@ any text, documents, notes, and information. Think of it as an agent's
 personal library that persists across sessions.
 
 Usage:
-    uv run librarian/server.py stdio    # For Claude Desktop, CLI tools
-    uv run librarian/server.py http     # For Cursor, VS Code (HTTP streaming)
+    uv run python -m librarian.server stdio    # For Claude Desktop, CLI tools
+    uv run python -m librarian.server http     # For Cursor, VS Code (HTTP streaming)
+
+Note: invoke via `-m librarian.server`, not `librarian/server.py`. The latter
+puts the `librarian/` directory on sys.path[0], where `librarian/types.py`
+shadows stdlib `types` and crashes import on `from types import GenericAlias`.
 """
 
 import logging
@@ -252,6 +256,23 @@ async def index_directory_to_library(
     # Filter out system/binary files
     all_files = [f for f in all_files if not _should_skip_file(f, supported_extensions)]
 
+    if not all_files:
+        return {
+            "directory": str(dir_path),
+            "total_files": 0,
+            "indexed": 0,
+            "updated": 0,
+            "skipped": 0,
+            "errors": [],
+            "files": [],
+            "message": "No supported files found under this directory.",
+            "suggestion": (
+                f"Supported extensions: {', '.join(sorted(supported_extensions))}. "
+                "Check the path is the right directory, or install optional parsers: "
+                "`uv pip install -e '.[pdf]'` for PDFs, `uv pip install -e '.[vision]'` for images."
+            ),
+        }
+
     results: dict[str, Any] = {
         "directory": str(dir_path),
         "total_files": len(all_files),
@@ -443,6 +464,15 @@ async def add_to_library(
     - Personal notes and reminders
     - Any information worth remembering
     """
+    if not title or not title.strip():
+        return {
+            "error": "Title is required and cannot be empty.",
+            "suggestion": (
+                "Pass a descriptive title for the content (e.g. 'Q2 Roadmap Notes'). "
+                "The title becomes the filename and is how the document is referenced later."
+            ),
+        }
+
     dir_path = Path(directory) if directory else Path(DOCUMENTS_PATH)
 
     try:
@@ -457,7 +487,7 @@ async def add_to_library(
         }
 
     # Clean filename and ensure .md extension
-    filename = title.replace("/", "-").replace("\\", "-")
+    filename = title.replace("/", "-").replace("\\", "-").strip()
     if not filename.endswith(".md"):
         filename = filename + ".md"
 
@@ -484,7 +514,17 @@ async def add_to_library(
         content = frontmatter_str + content
 
     # Write the file
-    file_path.write_text(content, encoding="utf-8")
+    try:
+        file_path.write_text(content, encoding="utf-8")
+    except OSError as e:
+        return {
+            "error": f"Failed to write {file_path}: {e}",
+            "path": str(file_path),
+            "suggestion": (
+                "Check that the directory is writable and the disk has space. "
+                "Use get_library_sections() to find directories known to work."
+            ),
+        }
 
     # Build location context (always available even if indexing fails)
     sources = _get_sources_config()
@@ -596,7 +636,17 @@ async def update_library_doc(
         }
 
     # Write new content
-    file_path.write_text(content, encoding="utf-8")
+    try:
+        file_path.write_text(content, encoding="utf-8")
+    except OSError as e:
+        return {
+            "error": f"Failed to write to {file_path}: {e}",
+            "path": str(file_path),
+            "suggestion": (
+                "Check that the file is writable and the disk has space. "
+                "Common causes: read-only filesystem, permission denied, or disk full."
+            ),
+        }
 
     # Reindex
     try:
@@ -609,7 +659,17 @@ async def update_library_doc(
             "chunks": result["chunks"],
         }
     except Exception as e:
-        return {"error": str(e), "path": str(file_path)}
+        logger.exception("Reindex failed for %s", file_path)
+        return {
+            "status": "updated_not_indexed",
+            "error": f"Content written but reindex failed: {e}",
+            "path": str(file_path),
+            "suggestion": (
+                "The file was saved to disk but the search index is out of date. "
+                "Run index_directory_to_library() on the parent directory to rebuild the index, "
+                "or call get_library_stats() to check if the embedding service is available."
+            ),
+        }
 
 
 # =============================================================================
@@ -660,6 +720,19 @@ async def search_library(
     if not query.strip():
         return []
 
+    # MCP clients that omit a parameter can surface here as None even when
+    # the Python signature declares a default; coerce explicitly so the
+    # HYBRID branch below isn't entered with mode=None.
+    if mode is None:
+        mode = SearchMode.HYBRID
+    # cross_modal was a deprecated alias for hybrid; accept the raw string
+    # if it arrives from a stale client (pydantic will have rejected it at
+    # the input layer, so this only catches direct-dispatch paths).
+    if isinstance(mode, str) and mode == "cross_modal":
+        mode = SearchMode.HYBRID
+    if limit is None:
+        limit = 10
+
     db = get_database()
     filter_doc_ids: list[int] | None = None
 
@@ -673,11 +746,27 @@ async def search_library(
         # Custom date range
         parsed_start = parse_date_string(start_date)
         if not parsed_start:
-            return [{"error": f"Invalid start_date format: {start_date}. Use YYYY-MM-DD."}]
+            return [
+                {
+                    "error": f"Invalid start_date format: {start_date!r}. Use YYYY-MM-DD.",
+                    "suggestion": (
+                        "Pass dates as 'YYYY-MM-DD' (e.g. '2026-03-15'), or use the 'timeframe' "
+                        "parameter for relative ranges like 'today', 'this_week', or 'last_30_days'."
+                    ),
+                }
+            ]
 
         parsed_end = parse_date_string(end_date) if end_date else None
         if end_date and not parsed_end:
-            return [{"error": f"Invalid end_date format: {end_date}. Use YYYY-MM-DD."}]
+            return [
+                {
+                    "error": f"Invalid end_date format: {end_date!r}. Use YYYY-MM-DD.",
+                    "suggestion": (
+                        "Pass dates as 'YYYY-MM-DD' (e.g. '2026-03-15'). Omit end_date to use "
+                        "the current time as the range end."
+                    ),
+                }
+            ]
 
         if (
             parsed_end
@@ -702,33 +791,48 @@ async def search_library(
     searcher = _get_searcher()
 
     # Execute search based on mode
-    if mode == SearchMode.SEMANTIC:
-        # Use modality-specific embeddings when available
-        if asset_type == AssetType.CODE and ENABLE_CODE_EMBEDDINGS:
-            results = searcher.vector_search_by_modality(query, EmbeddingModality.CODE, limit=limit)
-        elif asset_type == AssetType.IMAGE and ENABLE_VISION_EMBEDDINGS:
-            results = searcher.vector_search_by_modality(
-                query, EmbeddingModality.VISION, limit=limit
-            )
-        else:
-            results = searcher.vector_search(query, limit=limit)
-            # Filter by asset type if specified (vector_search doesn't support it natively)
+    try:
+        if mode == SearchMode.SEMANTIC:
+            # Use modality-specific embeddings when available
+            if asset_type == AssetType.CODE and ENABLE_CODE_EMBEDDINGS:
+                results = searcher.vector_search_by_modality(
+                    query, EmbeddingModality.CODE, limit=limit
+                )
+            elif asset_type == AssetType.IMAGE and ENABLE_VISION_EMBEDDINGS:
+                results = searcher.vector_search_by_modality(
+                    query, EmbeddingModality.VISION, limit=limit
+                )
+            else:
+                results = searcher.vector_search(query, limit=limit)
+                # Filter by asset type if specified (vector_search doesn't support it natively)
+                if asset_type_filter:
+                    results = [r for r in results if r.asset_type in asset_type_filter][:limit]
+        elif mode == SearchMode.KEYWORD:
+            results = searcher.keyword_search(query, limit=limit)
+            # Filter by asset type if specified
             if asset_type_filter:
                 results = [r for r in results if r.asset_type in asset_type_filter][:limit]
-    elif mode == SearchMode.KEYWORD:
-        results = searcher.keyword_search(query, limit=limit)
-        # Filter by asset type if specified
-        if asset_type_filter:
-            results = [r for r in results if r.asset_type in asset_type_filter][:limit]
-    else:
-        # HYBRID or CROSS_MODAL
-        results = searcher.search(
-            query,
-            limit=limit,
-            use_mmr=True,
-            filter_document_ids=filter_doc_ids,
-            asset_types=asset_type_filter,
-        )
+        else:
+            # HYBRID
+            results = searcher.search(
+                query,
+                limit=limit,
+                use_mmr=True,
+                filter_document_ids=filter_doc_ids,
+                asset_types=asset_type_filter,
+            )
+    except Exception as e:
+        logger.exception("search_library failed (mode=%s)", mode.value)
+        return [
+            {
+                "error": f"Search failed in {mode.value} mode: {e}",
+                "suggestion": (
+                    "Retry with mode='keyword' (pure full-text search, no embeddings). "
+                    "If that also fails, the index may be empty or corrupt — run "
+                    "get_library_stats() to check, or re-index with index_directory_to_library()."
+                ),
+            }
+        ]
 
     # Apply document ID filter for non-hybrid modes (hybrid handles it internally)
     if filter_doc_ids and mode in (SearchMode.SEMANTIC, SearchMode.KEYWORD):
@@ -773,7 +877,28 @@ async def read_from_library(
         # Try reading from filesystem
         file_path = Path(path)
         if file_path.exists():
-            content = file_path.read_text(encoding="utf-8")
+            try:
+                content = file_path.read_text(encoding="utf-8")
+            except UnicodeDecodeError:
+                return {
+                    "error": f"File is not UTF-8 text: {path}",
+                    "path": path,
+                    "suggestion": (
+                        "This appears to be a binary file (image, PDF, compiled output). "
+                        "read_from_library only returns text. Use search_library() to find "
+                        "text documents, or index the file with index_directory_to_library() "
+                        "which routes binary types through the appropriate parser."
+                    ),
+                }
+            except (OSError, PermissionError) as e:
+                return {
+                    "error": f"Cannot read file {path}: {e}",
+                    "path": path,
+                    "suggestion": (
+                        "The file exists but could not be opened. Check filesystem permissions "
+                        "and that the path is still accessible (not on an unmounted volume)."
+                    ),
+                }
             return {
                 "path": path,
                 "content": content,
@@ -832,11 +957,25 @@ async def remove_from_library(
     if delete_file:
         file_path = Path(path)
         if file_path.exists():
-            file_path.unlink()
-            result["file_deleted"] = True
-            result["message"] = "Document permanently deleted"
+            try:
+                file_path.unlink()
+                result["file_deleted"] = True
+                result["message"] = "Document permanently deleted"
+            except (OSError, PermissionError) as e:
+                result["file_deleted"] = False
+                result["error"] = f"Removed from index but could not delete file: {e}"
+                result["suggestion"] = (
+                    "The document is no longer in the search index, but the file on disk "
+                    "could not be removed (likely a permission issue or the file is in use). "
+                    "Delete it manually, or call remove_from_library with delete_file=False "
+                    "to suppress this warning."
+                )
         else:
             result["file_deleted"] = False
+            result["note"] = (
+                f"Requested file delete but no file exists at {path}. "
+                "It was already gone, or the path pointed only at an index entry."
+            )
 
     return result
 

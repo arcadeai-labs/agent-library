@@ -103,9 +103,12 @@ class OutputFormat(str, Enum):
 
 
 class SearchMode(str, Enum):
-    """Search mode options."""
+    """Search mode options. 'vector' is accepted as an alias for 'semantic'
+    to match the MCP tool's advertised modes without breaking existing CLI
+    callers that pass --mode vector."""
 
     HYBRID = "hybrid"
+    SEMANTIC = "semantic"
     VECTOR = "vector"
     KEYWORD = "keyword"
 
@@ -1209,9 +1212,11 @@ def search_cmd(
     from librarian.types import AssetType as LibAssetType
     from librarian.types import SearchMode as LibSearchMode
 
-    # Map CLI search mode to library SearchMode
+    # Map CLI search mode to library SearchMode. VECTOR is a legacy CLI
+    # alias for SEMANTIC kept for backward compatibility.
     mode_map = {
         SearchMode.HYBRID: LibSearchMode.HYBRID,
+        SearchMode.SEMANTIC: LibSearchMode.SEMANTIC,
         SearchMode.VECTOR: LibSearchMode.SEMANTIC,
         SearchMode.KEYWORD: LibSearchMode.KEYWORD,
     }

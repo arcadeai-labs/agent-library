@@ -103,7 +103,6 @@ class SearchMode(str, Enum):
     HYBRID = "hybrid"
     SEMANTIC = "semantic"
     KEYWORD = "keyword"
-    CROSS_MODAL = "cross_modal"
 
 
 # Timeframe is canonically defined in librarian.utils.timeframe
