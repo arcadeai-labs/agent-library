@@ -22,6 +22,7 @@ from typing import Annotated, Any
 
 from arcade_mcp_server import Context, MCPApp
 
+from librarian import __version__
 from librarian.config import (
     CHUNK_OVERLAP,
     CHUNK_SIZE,
@@ -49,7 +50,7 @@ logger = logging.getLogger(__name__)
 # Create the MCP application
 app = MCPApp(
     name="Librarian",
-    version="0.10.0",
+    version=__version__,
     log_level="INFO",
 )
 
