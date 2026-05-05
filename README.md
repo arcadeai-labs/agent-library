@@ -1,10 +1,14 @@
-# Librarian
+# Agent Library
 
 A personal knowledge library for AI agents, built on [Arcade](https://arcade.dev) for the Model Context Protocol (MCP).
 
+> **Status.** Agent Library is a community project built by Arcade.dev engineers. **It is not an official Arcade.dev product** and is not covered by Arcade.dev support or SLAs. See [Support](#support) below for what to expect.
+
+> **Naming.** The package is **Agent Library** (`agent-library` on PyPI, `librarian` as the Python module). The MCP server inside it identifies itself as `Librarian` — that's the role your agent talks to, and it's why the exposed tools are named `Librarian_SearchLibrary`, `Librarian_AddToLibrary`, and so on.
+
 ## Overview
 
-Librarian provides AI agents with persistent storage for text, documents, and knowledge. Agents can store information and retrieve it later through semantic and keyword search, maintaining context across conversations.
+Agent Library provides AI agents with persistent storage for text, documents, and knowledge. Agents can store information and retrieve it later through semantic and keyword search, maintaining context across conversations.
 
 ```mermaid
 graph LR
@@ -31,7 +35,7 @@ graph LR
 
 ## Multi-Modal Support
 
-Librarian supports indexing and searching across multiple file types:
+Agent Library supports indexing and searching across multiple file types:
 
 | Asset Type | File Extensions | Features |
 |------------|----------------|----------|
@@ -42,24 +46,35 @@ Librarian supports indexing and searching across multiple file types:
 
 ## Installation
 
+The recommended way to install Agent Library is as a [uv tool](https://docs.astral.sh/uv/concepts/tools/), which gives you the `libr` CLI and the MCP server in an isolated environment:
+
 ```bash
-git clone https://github.com/ArcadeAI/librarian.git
-cd librarian
+uv tool install 'agent-library[all]'
+```
+
+The `[all]` extra pulls in optional support for PDFs, images, OCR, and code-aware embeddings. If you'd rather install only what you need:
+
+```bash
+uv tool install agent-library                # core only (text + code)
+uv tool install 'agent-library[pdf]'         # add PDF support
+uv tool install 'agent-library[vision]'      # add image support
+uv tool install 'agent-library[ocr]'         # add OCR for image-based PDFs
+```
+
+### Installing from source
+
+If you want to contribute or run from a clone:
+
+```bash
+git clone https://github.com/arcadeai-labs/agent-library.git
+cd agent-library
 ./setup.sh
 ```
 
-Or install manually:
+Or install manually with the dev extras:
 
 ```bash
-uv pip install -e ".[dev]"
-```
-
-Optional multi-modal dependencies:
-
-```bash
-uv pip install -e ".[pdf]"      # PDF support (pypdf)
-uv pip install -e ".[vision]"   # Image support (Pillow)
-uv pip install -e ".[all]"      # All optional features
+uv pip install -e ".[dev,all]"
 ```
 
 ## CLI Usage
@@ -177,9 +192,25 @@ make evals      # Run evaluations
 - [Arcade.dev](https://arcade.dev) - Build AI-native applications
 - [Arcade Documentation](https://docs.arcade.dev) - Integration guides and API reference
 
+## Support
+
+Agent Library is a community project built by Arcade.dev engineers. It is not an official Arcade.dev product and is not covered by Arcade.dev support or SLAs.
+
+- **GitHub issues** are monitored on a best-effort basis. Expect response times in days-to-weeks, not hours.
+- **Pull requests** are welcome. See [CONTRIBUTING.md](CONTRIBUTING.md) for how to file one and what we're likely to accept.
+- **Security vulnerabilities** should be reported privately per [SECURITY.md](SECURITY.md), not via public issues.
+
+If you're using Agent Library in something important, snapshot the SQLite index (`~/.librarian/index.db`) before anything you can't easily redo. The index is a single file — `cp` is your friend.
+
+## Contributing
+
+See [CONTRIBUTING.md](CONTRIBUTING.md). Issues, PRs, and new parsers/embedders are all welcome.
+
 ## License
 
-MIT License - see [LICENSE](LICENSE) for details.
+Apache License 2.0 - see [LICENSE](LICENSE) for details.
+
+Agent Library was originally developed by Arcade.dev. See [NOTICE](NOTICE) for attribution requirements when redistributing.
 
 ## Contact
 
