@@ -6,9 +6,15 @@ discover the exact shape of every tool's response without inspecting docs.
 Optional fields use the inheritance + ``total=False`` pattern instead of
 ``NotRequired`` so that pydantic's TypedDict-to-model conversion (used by
 ``arcade_core.catalog.create_model_from_typeddict``) can introspect them.
+
+Imports ``TypedDict`` from ``typing_extensions`` rather than ``typing``:
+pydantic refuses ``typing.TypedDict`` on Python < 3.12, since the stdlib
+version doesn't surface the per-field metadata pydantic needs.
 """
 
-from typing import Any, TypedDict
+from typing import Any
+
+from typing_extensions import TypedDict
 
 
 class IndexFileResultBase(TypedDict):
