@@ -4,7 +4,9 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-**Librarian** (package name: `agent-library`) is a multi-modal knowledge library for AI agents built on Arcade for the Model Context Protocol (MCP). It provides persistent storage with semantic and keyword search for text, code, images, and PDFs.
+**Agent Library** (package name: `agent-library`, Python module: `librarian`) is a multi-modal knowledge library for AI agents built on Arcade for the Model Context Protocol (MCP). It provides persistent storage with semantic and keyword search for text, code, images, and PDFs.
+
+**Naming note for contributors:** The product is "Agent Library." The Python module path is `librarian` (don't rename — it's the import surface). The MCP server identifies itself as `Librarian` (`MCPApp(name="Librarian")` in `server.py`), which is why exposed tools carry the `Librarian_` prefix. Keep that distinction in mind: prose says "Agent Library"; code-level identifiers say "librarian"/"Librarian".
 
 ### Key Technologies
 - SQLite with `sqlite-vec` for vector search
@@ -516,7 +518,7 @@ export CHUNK_SIZE="256"
 
 ## License
 
-MIT License - see [LICENSE](LICENSE) for details.
+Apache License 2.0 - see [LICENSE](LICENSE) for details.
 
 ## Contact
 

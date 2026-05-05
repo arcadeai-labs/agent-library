@@ -3,7 +3,7 @@ name = "agent-library"
 version = "0.12.0"
 description = "Multi-modal knowledge library with vector and full-text search for text, code, images, and PDFs"
 readme = "README.md"
-license = "MIT"
+license = "Apache-2.0"
 requires-python = ">=3.10"
 authors = [
     { name = "Arcade.dev", email = "dev@arcade.dev" }
@@ -13,7 +13,7 @@ classifiers = [
     "Development Status :: 4 - Beta",
     "Environment :: Console",
     "Intended Audience :: Developers",
-    "License :: OSI Approved :: MIT License",
+    "License :: OSI Approved :: Apache Software License",
     "Operating System :: OS Independent",
     "Programming Language :: Python :: 3",
     "Programming Language :: Python :: 3.10",
