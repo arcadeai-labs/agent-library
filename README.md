@@ -128,10 +128,7 @@ See the [Arcade MCP documentation](https://docs.arcade.dev) for integration deta
 
 | Tool | Description |
 |------|-------------|
-| `Librarian_GetLibrarySources` | List sources with document/chunk counts |
-| `Librarian_GetLibraryStats` | Overall library statistics |
-| `Librarian_GetLibraryStructure` | Filesystem structure of library sources |
-| `Librarian_GetLibrarySections` | Simplified view of available storage locations |
+| `Librarian_GetLibraryOverview` | Inspect the library — `view` selects `sections` (default; storage locations + doc counts), `stats` (totals + config), or `tree` (recursive filesystem walk) |
 | `Librarian_SuggestLibraryLocation` | AI-powered suggestions for where to store content |
 
 ## Configuration
@@ -149,7 +146,7 @@ Set via environment variables:
 | `CHUNK_SIZE` | `512` | Max characters per chunk |
 | `CHUNK_OVERLAP` | `50` | Overlap between chunks |
 | `SEARCH_LIMIT` | `10` | Default results limit |
-| `MMR_LAMBDA` | `0.5` | MMR diversity (0=diverse, 1=relevant) |
+| `MMR_LAMBDA` | `0.7` | MMR diversity (0=diverse, 1=relevant) |
 | `HYBRID_ALPHA` | `0.7` | Vector vs keyword weight (1=vector only) |
 
 ## Project Structure

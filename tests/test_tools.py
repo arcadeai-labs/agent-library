@@ -4,6 +4,7 @@ from pathlib import Path
 from typing import Any
 
 import pytest
+from arcade_tdk.errors import RetryableToolError
 
 # Context can be None in tests since we don't use it
 CTX: Any = None
@@ -28,17 +29,17 @@ class TestIngestionTools:
 
     @pytest.mark.asyncio
     async def test_index_nonexistent_directory(self, clean_db: Path) -> None:
-        """Test indexing from a nonexistent directory."""
+        """Test indexing from a nonexistent directory raises a retryable error."""
         from librarian.server import index_directory_to_library
 
-        result = await index_directory_to_library(
-            context=CTX,
-            directory="/nonexistent/path",
-        )
+        with pytest.raises(RetryableToolError) as exc_info:
+            await index_directory_to_library(
+                context=CTX,
+                directory="/nonexistent/path",
+            )
 
-        assert "error" in result
-        assert result["indexed"] == 0
-        assert "suggestion" in result
+        assert "no directory at" in str(exc_info.value)
+        assert exc_info.value.additional_prompt_content is not None
 
     @pytest.mark.asyncio
     async def test_index_change_detection(self, temp_docs_dir: Path, clean_db: Path) -> None:
@@ -118,17 +119,18 @@ class TestIngestionTools:
 
     @pytest.mark.asyncio
     async def test_add_to_library_already_exists(self, temp_docs_dir: Path, clean_db: Path) -> None:
-        """Test adding content that already exists."""
+        """Adding content with an existing title should raise a retryable error."""
         from librarian.server import add_to_library
 
-        result = await add_to_library(
-            context=CTX,
-            content="New content.",
-            title="test1",  # Already exists
-            directory=str(temp_docs_dir),
-        )
+        with pytest.raises(RetryableToolError) as exc_info:
+            await add_to_library(
+                context=CTX,
+                content="New content.",
+                title="test1",  # Already exists
+                directory=str(temp_docs_dir),
+            )
 
-        assert "error" in result
+        assert "already lives at" in str(exc_info.value)
 
     @pytest.mark.asyncio
     async def test_update_library_doc(self, temp_docs_dir: Path, clean_db: Path) -> None:
@@ -258,12 +260,14 @@ class TestDocumentManagementTools:
 
     @pytest.mark.asyncio
     async def test_read_nonexistent_from_library(self, clean_db: Path) -> None:
-        """Test reading nonexistent content from the library."""
+        """Reading a missing document should raise a retryable error."""
         from librarian.server import read_from_library
 
-        result = await read_from_library(context=CTX, path="/nonexistent/file.md")
-        assert "error" in result
-        assert "suggestion" in result
+        with pytest.raises(RetryableToolError) as exc_info:
+            await read_from_library(context=CTX, path="/nonexistent/file.md")
+
+        assert "Nothing in the library" in str(exc_info.value)
+        assert exc_info.value.additional_prompt_content is not None
 
     @pytest.mark.asyncio
     async def test_remove_from_library(self, temp_docs_dir: Path, clean_db: Path) -> None:
@@ -296,20 +300,35 @@ class TestDocumentManagementTools:
         assert len(result) >= 2
 
     @pytest.mark.asyncio
-    async def test_get_library_stats(self, clean_db: Path) -> None:
-        """Test getting library statistics."""
-        from librarian.server import get_library_stats
+    async def test_get_library_overview_stats(self, clean_db: Path) -> None:
+        """STATS view returns library totals + the active config block."""
+        from librarian.server import get_library_overview
+        from librarian.types import LibraryView
 
-        result = await get_library_stats(context=CTX)
+        result = await get_library_overview(context=CTX, view=LibraryView.STATS)
+        assert result["view"] == "stats"
         assert "document_count" in result
         assert "chunk_count" in result
         assert "config" in result
 
     @pytest.mark.asyncio
-    async def test_get_library_sources(self, clean_db: Path) -> None:
-        """Test getting library sources."""
-        from librarian.server import get_library_sources
+    async def test_get_library_overview_sections(self, clean_db: Path) -> None:
+        """SECTIONS view returns the per-source section list (may be empty)."""
+        from librarian.server import get_library_overview
+        from librarian.types import LibraryView
 
-        result = await get_library_sources(context=CTX)
-        # Result should be a list (may be empty if no sources registered)
-        assert isinstance(result, list)
+        result = await get_library_overview(context=CTX, view=LibraryView.SECTIONS)
+        assert result["view"] == "sections"
+        assert "sections" in result
+        assert isinstance(result["sections"], list)
+
+    @pytest.mark.asyncio
+    async def test_get_library_overview_tree(self, clean_db: Path) -> None:
+        """TREE view returns recursive structure per source (may be empty)."""
+        from librarian.server import get_library_overview
+        from librarian.types import LibraryView
+
+        result = await get_library_overview(context=CTX, view=LibraryView.TREE, depth=2)
+        assert result["view"] == "tree"
+        assert "sources" in result
+        assert isinstance(result["sources"], list)

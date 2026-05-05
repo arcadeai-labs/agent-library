@@ -20,7 +20,13 @@ import sys
 from pathlib import Path
 from typing import Annotated, Any
 
+from arcade_core.metadata import (
+    Behavior,
+    Operation,
+    ToolMetadata,
+)
 from arcade_mcp_server import Context, MCPApp
+from arcade_tdk.errors import RetryableToolError, ToolExecutionError
 
 from librarian import __version__
 from librarian.config import (
@@ -42,7 +48,23 @@ from librarian.processing.embed import get_embedder
 from librarian.processing.parsers.base import FileReadError, FileReadTimeoutError
 from librarian.retrieval.search import HybridSearcher
 from librarian.storage.database import get_database
-from librarian.types import AssetType, EmbeddingModality, SearchMode
+from librarian.tool_outputs import (
+    AddOutput,
+    DocumentSummary,
+    IndexDirectoryOutput,
+    LibraryConfig,
+    OverviewResult,
+    OverviewSection,
+    OverviewSourceBlock,
+    ReadOutput,
+    RemoveOutput,
+    SearchHit,
+    SuggestResult,
+    TreeNode,
+    TreeSourceBlock,
+    UpdateOutput,
+)
+from librarian.types import AssetType, EmbeddingModality, LibraryView, SearchMode
 from librarian.utils.timeframe import Timeframe, get_timeframe_bounds, parse_date_string
 
 logger = logging.getLogger(__name__)
@@ -169,34 +191,37 @@ def _should_skip_file(file_path: Path, supported_extensions: set[str]) -> bool:
     return file_path.suffix.lower() not in supported_extensions
 
 
-def _resolve_path(raw_path: str, kind: str = "path") -> tuple[Path | None, dict[str, Any] | None]:
-    """
-    Resolve and validate a file or directory path.
+def _resolve_path(raw_path: str, kind: str = "path") -> Path:
+    """Resolve and validate a file or directory path.
 
-    Returns (resolved_path, None) on success, or (None, error_dict) on failure.
-    The error_dict contains an 'error' message and a 'suggestion' for the LLM.
+    Raises RetryableToolError on invalid input so the LLM can correct the path
+    and retry. The error carries plain instructions for the next step in
+    `additional_prompt_content`.
     """
     if not raw_path or not raw_path.strip():
-        return None, {
-            "error": f"Empty {kind} provided.",
-            "suggestion": (
-                "Provide an absolute path. Use list_library_contents() to see indexed documents, "
-                "or search_library() to find documents by content."
+        raise RetryableToolError(
+            message=f"You need to provide a {kind}.",
+            additional_prompt_content=(
+                f"Pass an absolute {kind} (one starting with '/'). "
+                "If you don't know the path, call list_library_contents to see "
+                "indexed documents, or search_library to find one by content."
             ),
-        }
+        )
 
     path = Path(raw_path).expanduser()
 
-    # Resolve symlinks and normalize
     try:
         path = path.resolve()
     except OSError as e:
-        return None, {
-            "error": f"Cannot resolve {kind}: {raw_path} ({e})",
-            "suggestion": "Check that the path is valid and accessible. Use an absolute path.",
-        }
+        raise RetryableToolError(
+            message=f"That {kind} ({raw_path}) couldn't be resolved.",
+            additional_prompt_content=(
+                f"Try again with a clean absolute {kind}. "
+                "Drop any quoting, environment variables, or special characters."
+            ),
+        ) from e
 
-    return path, None
+    return path
 
 
 # =============================================================================
@@ -204,11 +229,24 @@ def _resolve_path(raw_path: str, kind: str = "path") -> tuple[Path | None, dict[
 # =============================================================================
 
 
-@app.tool
+@app.tool(  # type: ignore[arg-type]
+    metadata=ToolMetadata(
+        behavior=Behavior(
+            operations=[Operation.CREATE, Operation.UPDATE],
+            read_only=False,
+            destructive=False,
+            idempotent=True,
+            open_world=False,
+        ),
+    ),
+)
 async def index_directory_to_library(
     context: Context,
     directory: Annotated[str, "Absolute path to directory containing files to add to the library"],
-) -> dict[str, Any]:
+) -> Annotated[
+    IndexDirectoryOutput,
+    "Per-directory index summary with counts and a per-file status list.",
+]:
     """
     Add all documents from a directory to the agent's library.
 
@@ -223,27 +261,25 @@ async def index_directory_to_library(
     dir_path = Path(directory) if directory else Path(DOCUMENTS_PATH)
 
     if not dir_path.exists():
-        return {
-            "error": f"Directory not found: {dir_path}",
-            "indexed": 0,
-            "suggestion": (
-                "Check the path exists and is absolute. "
-                "Use get_library_sources() to see registered sources, "
-                "or provide the full absolute path to a directory."
+        raise RetryableToolError(
+            message=f"There's no directory at {dir_path}.",
+            additional_prompt_content=(
+                "Try one of these:\n"
+                "  - Pass an absolute path that exists on disk.\n"
+                "  - Call get_library_overview to see directories already registered.\n"
+                "  - Ask the user where the files live."
             ),
-        }
+        )
 
     if not dir_path.is_dir():
-        return {
-            "error": f"Not a directory: {dir_path}",
-            "indexed": 0,
-            "suggestion": (
-                "This path points to a file, not a directory. "
-                "Provide the parent directory path, or use add_to_library() for single files."
+        raise RetryableToolError(
+            message=f"{dir_path} is a file, not a directory.",
+            additional_prompt_content=(
+                "If you want to index every file under a folder, pass that folder's path. "
+                "If you just want to add one file, use add_to_library instead."
             ),
-        }
+        )
 
-    # Find all supported files
     from librarian.processing.parsers.registry import get_registry
 
     registry = get_registry()
@@ -254,27 +290,26 @@ async def index_directory_to_library(
         pattern = f"**/*{ext}"
         all_files.extend(dir_path.glob(pattern))
 
-    # Filter out system/binary files
     all_files = [f for f in all_files if not _should_skip_file(f, supported_extensions)]
 
     if not all_files:
-        return {
-            "directory": str(dir_path),
-            "total_files": 0,
-            "indexed": 0,
-            "updated": 0,
-            "skipped": 0,
-            "errors": [],
-            "files": [],
-            "message": "No supported files found under this directory.",
-            "suggestion": (
+        return IndexDirectoryOutput(
+            directory=str(dir_path),
+            total_files=0,
+            indexed=0,
+            updated=0,
+            skipped=0,
+            errors=[],
+            files=[],
+            message=(
+                "No supported files found under this directory. "
                 f"Supported extensions: {', '.join(sorted(supported_extensions))}. "
-                "Check the path is the right directory, or install optional parsers: "
-                "`uv pip install -e '.[pdf]'` for PDFs, `uv pip install -e '.[vision]'` for images."
+                "Install optional parsers with `uv pip install -e '.[pdf]'` or "
+                "`uv pip install -e '.[vision]'` for additional formats."
             ),
-        }
+        )
 
-    results: dict[str, Any] = {
+    results: IndexDirectoryOutput = {
         "directory": str(dir_path),
         "total_files": len(all_files),
         "indexed": 0,
@@ -318,7 +353,7 @@ async def index_directory_to_library(
                     continue
 
             result = _process_and_index_file(file_path)
-            results["files"].append(result)
+            results["files"].append(result)  # type: ignore[arg-type]
 
             if result["status"] == "created":
                 results["indexed"] += 1
@@ -436,21 +471,34 @@ def _get_siblings(path: Path, include_dirs: bool = True) -> list[dict[str, str]]
     return siblings[:20]
 
 
-@app.tool
+@app.tool(  # type: ignore[arg-type]
+    metadata=ToolMetadata(
+        behavior=Behavior(
+            operations=[Operation.CREATE],
+            read_only=False,
+            destructive=False,
+            idempotent=False,
+            open_world=False,
+        ),
+    ),
+)
 async def add_to_library(
     context: Context,
     content: Annotated[str, "The text content to store in the library"],
     title: Annotated[str, "A title or filename for this content (without .md extension)"],
     directory: Annotated[
-        str, "Absolute path to directory for storage. Use get_library_sections to find valid paths."
+        str, "Absolute path to directory for storage. Use get_library_overview to find valid paths."
     ] = "",
     tags: Annotated[list[str] | None, "Optional tags to categorize this content"] = None,
     metadata: Annotated[dict[str, Any] | None, "Optional additional metadata"] = None,
-) -> dict[str, Any]:
+) -> Annotated[
+    AddOutput,
+    "Storage result, including final path, indexed flag, and breadcrumb location.",
+]:
     """
     Store new content in the agent's library.
 
-    IMPORTANT: Before adding content, use get_library_sections() to see available
+    IMPORTANT: Before adding content, use get_library_overview() to see available
     locations and their purposes. Pass the full directory path from that tool.
 
     Use this to save any text, notes, information, or knowledge that should
@@ -466,68 +514,67 @@ async def add_to_library(
     - Any information worth remembering
     """
     if not title or not title.strip():
-        return {
-            "error": "Title is required and cannot be empty.",
-            "suggestion": (
-                "Pass a descriptive title for the content (e.g. 'Q2 Roadmap Notes'). "
-                "The title becomes the filename and is how the document is referenced later."
+        raise RetryableToolError(
+            message="You need to pass a title.",
+            additional_prompt_content=(
+                "Pick a short descriptive title like 'Q2 Roadmap Notes' or "
+                "'Auth Refactor Plan'. The title becomes the filename, so use "
+                "letters, numbers, hyphens or spaces — no slashes."
             ),
-        }
+        )
 
     dir_path = Path(directory) if directory else Path(DOCUMENTS_PATH)
 
     try:
         dir_path.mkdir(parents=True, exist_ok=True)
     except OSError as e:
-        return {
-            "error": f"Cannot create directory: {dir_path} ({e})",
-            "suggestion": (
-                "Use get_library_sections() to find valid directories, "
-                "or check filesystem permissions."
+        raise RetryableToolError(
+            message=f"Couldn't create the directory {dir_path}.",
+            additional_prompt_content=(
+                "Pick a directory you can write to. Call get_library_overview "
+                "to see directories that already work, then pass one of those "
+                "as the `directory` argument."
             ),
-        }
+        ) from e
 
-    # Clean filename and ensure .md extension
     filename = title.replace("/", "-").replace("\\", "-").strip()
     if not filename.endswith(".md"):
         filename = filename + ".md"
 
     file_path = dir_path / filename
 
-    # Check if file already exists
     if file_path.exists():
-        return {
-            "error": f"Content with this title already exists: {title}",
-            "path": str(file_path),
-            "suggestion": "Use update_library_doc to modify existing content, or choose a different title.",
-        }
+        raise RetryableToolError(
+            message=f"A document called '{title}' already lives at {file_path}.",
+            additional_prompt_content=(
+                "Decide which one you want:\n"
+                f"  - To replace it, call update_library_doc with path='{file_path}'.\n"
+                "  - To keep both, pick a different title and call this tool again."
+            ),
+        )
 
-    # Build metadata
     meta = metadata or {}
     if tags:
         meta["tags"] = tags
 
-    # Add frontmatter if metadata provided
     if meta:
         import yaml
 
         frontmatter_str = "---\n" + yaml.dump(meta, default_flow_style=False) + "---\n\n"
         content = frontmatter_str + content
 
-    # Write the file
     try:
         file_path.write_text(content, encoding="utf-8")
     except OSError as e:
-        return {
-            "error": f"Failed to write {file_path}: {e}",
-            "path": str(file_path),
-            "suggestion": (
-                "Check that the directory is writable and the disk has space. "
-                "Use get_library_sections() to find directories known to work."
+        raise ToolExecutionError(
+            message=f"Couldn't save the file to {file_path}.",
+            developer_message=(
+                "Try a different directory the user has write access to. "
+                "Call get_library_overview to see ones that already work, "
+                "then call add_to_library again with that `directory`."
             ),
-        }
+        ) from e
 
-    # Build location context (always available even if indexing fails)
     sources = _get_sources_config()
     source = _find_source_for_path(file_path, sources)
     breadcrumb = _build_breadcrumb(file_path, source)
@@ -541,29 +588,27 @@ async def add_to_library(
         "breadcrumb_display": " → ".join(breadcrumb),
     }
 
-    # Try to index with embeddings
     try:
         result = _process_and_index_file(file_path)
-        return {
-            "status": "stored",
-            "message": f"Content '{title}' has been added to your library",
-            "path": str(file_path),
-            "title": result["title"],
-            "chunks": result["chunks"],
-            "indexed": True,
-            "location": location_info,
-            "context": {
-                "siblings": siblings,
+        return AddOutput(
+            status="stored",
+            message=f"Content '{title}' has been added to your library",
+            path=str(file_path),
+            title=result["title"],
+            chunks=result["chunks"],
+            indexed=True,
+            location=location_info,  # type: ignore[typeddict-item]
+            context={
+                "siblings": siblings,  # type: ignore[typeddict-item]
                 "sibling_count": len(siblings),
             },
-        }
+        )
     except Exception as e:
-        # Indexing failed (likely embedding service unavailable)
-        # File is still saved - try to store document metadata without embeddings
+        # Indexing failed (likely embedding service unavailable).
+        # File is still saved - try to store document metadata without embeddings.
         logger.warning("Full indexing failed, storing without embeddings: %s", e)
 
         try:
-            # Store document in database without embeddings for FTS search
             db = get_database()
             from librarian.processing.parsers.md import MarkdownParser
             from librarian.types import Document
@@ -582,95 +627,110 @@ async def add_to_library(
             )
             db.insert_document(doc)
 
-            return {
-                "status": "stored_partial",
-                "message": f"Content '{title}' saved but indexing incomplete (embedding service unavailable)",
-                "path": str(file_path),
-                "title": parsed.title,
-                "chunks": 0,
-                "indexed": False,
-                "warning": "File saved but not fully indexed. Keyword search will work, but semantic search won't find this content until re-indexed.",
-                "location": location_info,
-                "context": {
-                    "siblings": siblings,
+            return AddOutput(
+                status="stored_partial",
+                message=(
+                    f"Content '{title}' saved but indexing incomplete "
+                    "(embedding service unavailable)"
+                ),
+                path=str(file_path),
+                title=parsed.title,
+                chunks=0,
+                indexed=False,
+                warning=(
+                    "File saved but not fully indexed. Keyword search will work, "
+                    "but semantic search won't find this content until re-indexed."
+                ),
+                location=location_info,  # type: ignore[typeddict-item]
+                context={
+                    "siblings": siblings,  # type: ignore[typeddict-item]
                     "sibling_count": len(siblings),
                 },
-            }
+            )
         except Exception:
-            # Even basic storage failed - but file is still on disk
+            # File is on disk but neither indexing nor metadata storage worked.
             logger.exception("Failed to store document metadata")
-            return {
-                "status": "stored_file_only",
-                "message": f"Content '{title}' saved to disk but not indexed",
-                "path": str(file_path),
-                "indexed": False,
-                "error": str(e),
-                "location": location_info,
-            }
+            return AddOutput(
+                status="stored_file_only",
+                message=f"Content '{title}' saved to disk but not indexed",
+                path=str(file_path),
+                chunks=0,
+                indexed=False,
+                location=location_info,  # type: ignore[typeddict-item]
+                warning=f"Indexing pipeline error: {e}",
+            )
 
 
-@app.tool
+@app.tool(  # type: ignore[arg-type]
+    metadata=ToolMetadata(
+        behavior=Behavior(
+            operations=[Operation.UPDATE],
+            read_only=False,
+            destructive=False,
+            idempotent=True,
+            open_world=False,
+        ),
+    ),
+)
 async def update_library_doc(
     context: Context,
     path: Annotated[str, "Absolute path to the document to update"],
     content: Annotated[str, "The new content to replace the existing content"],
-) -> dict[str, Any]:
+) -> Annotated[
+    UpdateOutput,
+    "Confirmation of update plus chunk count from the re-index step.",
+]:
     """
     Update existing content in the agent's library.
 
     Use this to modify or replace content that was previously stored.
     The updated content will be re-indexed for search.
     """
-    resolved, err = _resolve_path(path, "document path")
-    if err:
-        return err
-
-    file_path: Path = resolved  # type: ignore[assignment]  # guaranteed non-None when err is None
+    file_path = _resolve_path(path, "document path")
 
     if not file_path.exists():
-        return {
-            "error": f"Document not found: {path}",
-            "suggestion": (
-                "Use search_library() to find documents by content, "
-                "or list_library_contents() to see all indexed documents and their paths."
+        raise RetryableToolError(
+            message=f"There's no document at {path}.",
+            additional_prompt_content=(
+                "Find the right path first:\n"
+                "  - search_library — find a document by content\n"
+                "  - list_library_contents — see every indexed document and its path"
             ),
-        }
+        )
 
-    # Write new content
     try:
         file_path.write_text(content, encoding="utf-8")
     except OSError as e:
-        return {
-            "error": f"Failed to write to {file_path}: {e}",
-            "path": str(file_path),
-            "suggestion": (
-                "Check that the file is writable and the disk has space. "
-                "Common causes: read-only filesystem, permission denied, or disk full."
+        raise ToolExecutionError(
+            message=f"Couldn't write the new content to {file_path}.",
+            developer_message=(
+                "The file may be read-only, the disk may be full, or the volume "
+                "may be unmounted. Tell the user what happened and stop — "
+                "retrying won't help until the underlying issue is fixed."
             ),
-        }
+        ) from e
 
-    # Reindex
     try:
         result = _process_and_index_file(file_path)
-        return {
-            "status": "updated",
-            "message": "Content has been updated in your library",
-            "path": str(file_path),
-            "title": result["title"],
-            "chunks": result["chunks"],
-        }
     except Exception as e:
         logger.exception("Reindex failed for %s", file_path)
-        return {
-            "status": "updated_not_indexed",
-            "error": f"Content written but reindex failed: {e}",
-            "path": str(file_path),
-            "suggestion": (
-                "The file was saved to disk but the search index is out of date. "
-                "Run index_directory_to_library() on the parent directory to rebuild the index, "
-                "or call get_library_stats() to check if the embedding service is available."
+        raise ToolExecutionError(
+            message=f"Saved {file_path} but the search index didn't update.",
+            developer_message=(
+                "The file is on disk but won't show up in search yet. "
+                "Call index_directory_to_library on the parent directory to "
+                "rebuild the index. If that also fails, call get_library_overview(view='stats') "
+                "to confirm the embedding service is reachable."
             ),
-        }
+        ) from e
+
+    return UpdateOutput(
+        status="updated",
+        message="Content has been updated in your library",
+        path=str(file_path),
+        title=result["title"],
+        chunks=result["chunks"],
+    )
 
 
 # =============================================================================
@@ -678,7 +738,17 @@ async def update_library_doc(
 # =============================================================================
 
 
-@app.tool
+@app.tool(  # type: ignore[arg-type]
+    metadata=ToolMetadata(
+        behavior=Behavior(
+            operations=[Operation.READ],
+            read_only=True,
+            destructive=False,
+            idempotent=True,
+            open_world=False,
+        ),
+    ),
+)
 async def search_library(
     context: Context,
     query: Annotated[str, "What to search for in the library"],
@@ -703,7 +773,10 @@ async def search_library(
         "End date for custom range (YYYY-MM-DD). Use with start_date.",
     ] = None,
     limit: Annotated[int, "Maximum number of results to return"] = 10,
-) -> list[dict[str, Any]]:
+) -> Annotated[
+    list[SearchHit],
+    "Ranked list of matching chunks with score, snippet, and asset type.",
+]:
     """
     Search the agent's library for relevant information.
 
@@ -747,27 +820,26 @@ async def search_library(
         # Custom date range
         parsed_start = parse_date_string(start_date)
         if not parsed_start:
-            return [
-                {
-                    "error": f"Invalid start_date format: {start_date!r}. Use YYYY-MM-DD.",
-                    "suggestion": (
-                        "Pass dates as 'YYYY-MM-DD' (e.g. '2026-03-15'), or use the 'timeframe' "
-                        "parameter for relative ranges like 'today', 'this_week', or 'last_30_days'."
-                    ),
-                }
-            ]
+            raise RetryableToolError(
+                message=f"start_date={start_date!r} isn't a date I can parse.",
+                additional_prompt_content=(
+                    "Pass start_date as 'YYYY-MM-DD' (for example '2026-03-15'). "
+                    "If the user said something like 'this week' or 'last 30 days', "
+                    "use the `timeframe` parameter instead — it accepts 'today', "
+                    "'yesterday', 'this_week', 'last_week', 'this_month', "
+                    "'last_month', 'last_7_days', 'last_30_days', or 'this_year'."
+                ),
+            )
 
         parsed_end = parse_date_string(end_date) if end_date else None
         if end_date and not parsed_end:
-            return [
-                {
-                    "error": f"Invalid end_date format: {end_date!r}. Use YYYY-MM-DD.",
-                    "suggestion": (
-                        "Pass dates as 'YYYY-MM-DD' (e.g. '2026-03-15'). Omit end_date to use "
-                        "the current time as the range end."
-                    ),
-                }
-            ]
+            raise RetryableToolError(
+                message=f"end_date={end_date!r} isn't a date I can parse.",
+                additional_prompt_content=(
+                    "Pass end_date as 'YYYY-MM-DD' (for example '2026-03-15'), "
+                    "or simply leave it out to use 'now' as the range end."
+                ),
+            )
 
         if (
             parsed_end
@@ -824,16 +896,15 @@ async def search_library(
             )
     except Exception as e:
         logger.exception("search_library failed (mode=%s)", mode.value)
-        return [
-            {
-                "error": f"Search failed in {mode.value} mode: {e}",
-                "suggestion": (
-                    "Retry with mode='keyword' (pure full-text search, no embeddings). "
-                    "If that also fails, the index may be empty or corrupt — run "
-                    "get_library_stats() to check, or re-index with index_directory_to_library()."
-                ),
-            }
-        ]
+        raise RetryableToolError(
+            message=f"The {mode.value} search backend isn't responding.",
+            additional_prompt_content=(
+                "Try again with mode='keyword'. That uses plain full-text search "
+                "and doesn't depend on the embedding service. "
+                "If keyword mode also fails, call get_library_overview(view='stats') — the index "
+                "may be empty (in which case ask the user to add content first)."
+            ),
+        ) from e
 
     # Apply document ID filter for non-hybrid modes (hybrid handles it internally)
     if filter_doc_ids and mode in (SearchMode.SEMANTIC, SearchMode.KEYWORD):
@@ -841,16 +912,16 @@ async def search_library(
         results = [r for r in results if r.document_id in filter_set]
 
     return [
-        {
-            "chunk_id": r.chunk_id,
-            "document_id": r.document_id,
-            "document_path": r.document_path,
-            "content": r.content,
-            "heading_path": r.heading_path,
-            "score": round(r.score, 4),
-            "snippet": r.snippet,
-            "asset_type": r.asset_type.value,
-        }
+        SearchHit(
+            chunk_id=r.chunk_id,
+            document_id=r.document_id,
+            document_path=r.document_path,
+            content=r.content,
+            heading_path=r.heading_path,
+            score=round(r.score, 4),
+            snippet=r.snippet,
+            asset_type=r.asset_type.value,
+        )
         for r in results
     ]
 
@@ -860,11 +931,24 @@ async def search_library(
 # =============================================================================
 
 
-@app.tool
+@app.tool(  # type: ignore[arg-type]
+    metadata=ToolMetadata(
+        behavior=Behavior(
+            operations=[Operation.READ],
+            read_only=True,
+            destructive=False,
+            idempotent=True,
+            open_world=False,
+        ),
+    ),
+)
 async def read_from_library(
     context: Context,
     path: Annotated[str, "Absolute path to the document to read"],
-) -> dict[str, Any]:
+) -> Annotated[
+    ReadOutput,
+    "Full document content plus metadata. `indexed=False` if read directly from disk.",
+]:
     """
     Read the full content of a document from the library.
 
@@ -875,63 +959,77 @@ async def read_from_library(
     doc = db.get_document_by_path(path)
 
     if not doc:
-        # Try reading from filesystem
         file_path = Path(path)
         if file_path.exists():
             try:
                 content = file_path.read_text(encoding="utf-8")
-            except UnicodeDecodeError:
-                return {
-                    "error": f"File is not UTF-8 text: {path}",
-                    "path": path,
-                    "suggestion": (
-                        "This appears to be a binary file (image, PDF, compiled output). "
-                        "read_from_library only returns text. Use search_library() to find "
-                        "text documents, or index the file with index_directory_to_library() "
-                        "which routes binary types through the appropriate parser."
+            except UnicodeDecodeError as e:
+                raise RetryableToolError(
+                    message=f"{path} is a binary file, not text.",
+                    additional_prompt_content=(
+                        "read_from_library only returns text. For PDFs, images, "
+                        "or other binaries, use index_directory_to_library on the "
+                        "parent directory first — that routes each file through "
+                        "the right parser. Then search_library will surface its "
+                        "content."
                     ),
-                }
+                ) from e
             except (OSError, PermissionError) as e:
-                return {
-                    "error": f"Cannot read file {path}: {e}",
-                    "path": path,
-                    "suggestion": (
-                        "The file exists but could not be opened. Check filesystem permissions "
-                        "and that the path is still accessible (not on an unmounted volume)."
+                raise ToolExecutionError(
+                    message=f"The file at {path} exists but can't be opened.",
+                    developer_message=(
+                        "Likely causes: the volume is unmounted, the file is "
+                        "locked, or permissions changed. Tell the user the path "
+                        "is unreachable and ask them to verify it."
                     ),
-                }
-            return {
-                "path": path,
-                "content": content,
-                "indexed": False,
-                "note": "This file exists but is not in the library index",
-            }
-        return {
-            "error": f"Document not found: {path}",
-            "suggestion": (
-                "Use search_library() to find documents by content, "
-                "or list_library_contents() to see all indexed documents and their paths."
+                ) from e
+            return ReadOutput(
+                id=None,
+                path=path,
+                content=content,
+                indexed=False,
+                note="This file is on disk but not in the library index yet.",
+            )
+        raise RetryableToolError(
+            message=f"Nothing in the library at {path}.",
+            additional_prompt_content=(
+                "Find the right path first:\n"
+                "  - search_library — find a document by content keywords\n"
+                "  - list_library_contents — see every indexed document and its path"
             ),
-        }
+        )
 
-    return {
-        "id": doc.id,
-        "path": doc.path,
-        "title": doc.title,
-        "content": doc.content,
-        "metadata": doc.metadata,
-        "created_at": str(doc.created_at) if doc.created_at else None,
-        "updated_at": str(doc.updated_at) if doc.updated_at else None,
-        "indexed": True,
-    }
+    return ReadOutput(
+        id=doc.id,
+        path=doc.path,
+        title=doc.title,
+        content=doc.content,
+        metadata=doc.metadata,
+        created_at=str(doc.created_at) if doc.created_at else None,
+        updated_at=str(doc.updated_at) if doc.updated_at else None,
+        indexed=True,
+    )
 
 
-@app.tool
+@app.tool(  # type: ignore[arg-type]
+    metadata=ToolMetadata(
+        behavior=Behavior(
+            operations=[Operation.DELETE],
+            read_only=False,
+            destructive=True,
+            idempotent=True,
+            open_world=False,
+        ),
+    ),
+)
 async def remove_from_library(
     context: Context,
     path: Annotated[str, "Absolute path to the document to remove"],
     delete_file: Annotated[bool, "Also delete the file from disk (permanent)"] = False,
-) -> dict[str, Any]:
+) -> Annotated[
+    RemoveOutput,
+    "Outcome of removal: index status and (if requested) on-disk delete result.",
+]:
     """
     Remove a document from the agent's library.
 
@@ -940,21 +1038,14 @@ async def remove_from_library(
     """
     db = get_database()
 
-    # Remove from index
     deleted = db.delete_document_by_path(path)
 
-    result: dict[str, Any] = {
+    result: RemoveOutput = {
         "path": path,
         "removed_from_index": deleted,
         "message": "Document removed from library" if deleted else "Document was not in library",
     }
 
-    if not deleted:
-        result["suggestion"] = (
-            "Use search_library() or list_library_contents() to find the correct document path."
-        )
-
-    # Optionally delete file
     if delete_file:
         file_path = Path(path)
         if file_path.exists():
@@ -963,14 +1054,20 @@ async def remove_from_library(
                 result["file_deleted"] = True
                 result["message"] = "Document permanently deleted"
             except (OSError, PermissionError) as e:
-                result["file_deleted"] = False
-                result["error"] = f"Removed from index but could not delete file: {e}"
-                result["suggestion"] = (
-                    "The document is no longer in the search index, but the file on disk "
-                    "could not be removed (likely a permission issue or the file is in use). "
-                    "Delete it manually, or call remove_from_library with delete_file=False "
-                    "to suppress this warning."
-                )
+                # Index removal already happened; the disk delete is what failed.
+                # Surface as an execution error so the LLM sees the partial state.
+                raise ToolExecutionError(
+                    message=(
+                        f"The document was removed from the index, "
+                        f"but the file at {path} couldn't be deleted from disk."
+                    ),
+                    developer_message=(
+                        "Tell the user the document is gone from search but the "
+                        "file is still on disk, and that they need to delete it "
+                        "manually (or fix the permission issue and call this "
+                        "tool again)."
+                    ),
+                ) from e
         else:
             result["file_deleted"] = False
             result["note"] = (
@@ -981,11 +1078,24 @@ async def remove_from_library(
     return result
 
 
-@app.tool
+@app.tool(  # type: ignore[arg-type]
+    metadata=ToolMetadata(
+        behavior=Behavior(
+            operations=[Operation.READ],
+            read_only=True,
+            destructive=False,
+            idempotent=True,
+            open_world=False,
+        ),
+    ),
+)
 async def list_library_contents(
     context: Context,
     limit: Annotated[int, "Maximum number of documents to list"] = 100,
-) -> list[dict[str, Any]]:
+) -> Annotated[
+    list[DocumentSummary],
+    "Summary list of indexed documents with id, path, title, and timestamps.",
+]:
     """
     List all documents stored in the agent's library.
 
@@ -996,14 +1106,14 @@ async def list_library_contents(
     documents = db.list_documents()[:limit]
 
     return [
-        {
-            "id": doc.id,
-            "path": doc.path,
-            "title": doc.title,
-            "metadata": doc.metadata,
-            "created_at": str(doc.created_at) if doc.created_at else None,
-            "updated_at": str(doc.updated_at) if doc.updated_at else None,
-        }
+        DocumentSummary(
+            id=doc.id,
+            path=doc.path,
+            title=doc.title,
+            metadata=doc.metadata,
+            created_at=str(doc.created_at) if doc.created_at else None,
+            updated_at=str(doc.updated_at) if doc.updated_at else None,
+        )
         for doc in documents
     ]
 
@@ -1012,313 +1122,94 @@ async def list_library_contents(
 # Optional Tools (enabled via LIBRARIAN_ENABLE_OPTIONAL_TOOLS=true)
 # =============================================================================
 
+_READ_ONLY_BEHAVIOR = Behavior(
+    operations=[Operation.READ],
+    read_only=True,
+    destructive=False,
+    idempotent=True,
+    open_world=False,
+)
+
+
 if ENABLE_OPTIONAL_TOOLS:
-
-    @app.tool
-    async def get_library_sources(context: Context) -> list[dict[str, Any]]:
-        """
-        List all sources in the agent's library with statistics.
-
-        Shows each registered source (directory or file) along with:
-        - Number of documents indexed from that source
-        - Number of chunks generated
-        - Source path and name
-        - Whether the source is still accessible
-
-        Use this to understand what knowledge is in the library and where it came from.
-        """
-        sources = _get_sources_config()
-        if not sources:
-            return []
-
-        db = get_database()
-        all_documents = db.list_documents()
-
-        result = []
-        for source in sources:
-            source_path = source.get("path", "")
-            source_name = source.get("name", source_path)
-
-            # Count documents from this source
-            docs_from_source = [d for d in all_documents if d.path.startswith(source_path)]
-            doc_count = len(docs_from_source)
-
-            # Count chunks for these documents
-            chunk_count = 0
-            for doc in docs_from_source:
-                if doc.id:
-                    chunks = db.get_chunks_by_document(doc.id)
-                    chunk_count += len(chunks)
-
-            # Check if source still exists
-            path_obj = Path(source_path)
-            exists = path_obj.exists()
-
-            result.append({
-                "name": source_name,
-                "path": source_path,
-                "type": "file" if source.get("is_file") else "directory",
-                "document_count": doc_count,
-                "chunk_count": chunk_count,
-                "exists": exists,
-                "recursive": source.get("recursive", True),
-                "added_at": source.get("added_at"),
-            })
-
-        return result
-
-    @app.tool
-    async def get_library_stats(context: Context) -> dict[str, Any]:
-        """
-        Get overall statistics about the agent's library.
-
-        Shows total documents stored, chunks indexed, and configuration.
-        For per-source statistics, use get_library_sources instead.
-        """
-        db = get_database()
-        stats = db.get_stats()
-
-        return {
-            **stats,
-            "config": {
-                "documents_path": DOCUMENTS_PATH,
-                "chunk_size": CHUNK_SIZE,
-                "chunk_overlap": CHUNK_OVERLAP,
-                "search_limit": SEARCH_LIMIT,
-                "mmr_lambda": MMR_LAMBDA,
-                "hybrid_alpha": HYBRID_ALPHA,
-            },
-        }
-
-    @app.tool
-    async def get_library_structure(
-        context: Context,
-        depth: Annotated[int, "How many directory levels to show (1=top level only)"] = 1,
-        include_files: Annotated[bool, "Whether to include markdown files in output"] = True,
-    ) -> dict[str, Any]:
-        """
-        Get the filesystem structure of all library sources.
-
-        Returns the directory tree for each registered source, showing what
-        folders and files are available. This helps understand the organization
-        of knowledge in the library without reading the actual content.
-
-        Use this to:
-        - Explore what topics/categories exist in the library
-        - Find the right directory to search or add content to
-        - Understand how the library is organized
-        """
-        sources = _get_sources_config()
-        if not sources:
-            return {"sources": [], "message": "No sources registered"}
-
-        def get_structure(path: Path, current_depth: int, max_depth: int) -> dict[str, Any]:
-            """Recursively build directory structure."""
-            if not path.exists():
-                return {"error": f"Path does not exist: {path}"}
-
-            if path.is_file():
-                return {
-                    "name": path.name,
-                    "type": "file",
-                    "path": str(path),
-                }
-
-            structure: dict[str, Any] = {
-                "name": path.name,
-                "type": "directory",
-                "path": str(path),
-                "children": [],
-            }
-
-            if current_depth >= max_depth:
-                # Count children without listing them
-                try:
-                    dirs = [p for p in path.iterdir() if p.is_dir() and not p.name.startswith(".")]
-                    files = [p for p in path.iterdir() if p.is_file() and p.suffix == ".md"]
-                    structure["subdirectory_count"] = len(dirs)
-                    structure["file_count"] = len(files)
-                except PermissionError:
-                    structure["error"] = "Permission denied"
-                return structure
-
-            try:
-                children = []
-                for item in sorted(path.iterdir()):
-                    # Skip hidden files/directories
-                    if item.name.startswith("."):
-                        continue
-
-                    if item.is_dir():
-                        child_struct = get_structure(item, current_depth + 1, max_depth)
-                        children.append(child_struct)
-                    elif include_files and item.suffix == ".md":
-                        children.append({
-                            "name": item.name,
-                            "type": "file",
-                            "path": str(item),
-                        })
-
-                structure["children"] = children
-            except PermissionError:
-                structure["error"] = "Permission denied"
-
-            return structure
-
-        result_sources = []
-        for source in sources:
-            source_path = Path(source.get("path", ""))
-            source_name = source.get("name", source_path.name)
-
-            if not source_path.exists():
-                result_sources.append({
-                    "name": source_name,
-                    "path": str(source_path),
-                    "exists": False,
-                    "error": "Source path does not exist",
-                })
-                continue
-
-            structure = get_structure(source_path, 0, depth)
-            result_sources.append({
-                "name": source_name,
-                "path": str(source_path),
-                "exists": True,
-                "is_file": source.get("is_file", False),
-                "structure": structure,
-            })
-
-        return {
-            "sources": result_sources,
-            "total_sources": len(sources),
-        }
 
     def _build_directory_doc_index(
         documents: list[Any],
     ) -> tuple[dict[str, list[Any]], dict[str, int]]:
-        """
-        Build indexes for efficient directory-based document lookup.
-
-        Args:
-            documents: List of document objects with path and title attributes.
-
-        Returns:
-            Tuple of (docs_by_dir, count_by_prefix) for O(1) lookups.
-        """
+        """Index documents by parent dir and by every prefix for O(1) lookups."""
         from collections import defaultdict
 
-        # Index documents by their parent directory
         docs_by_dir: dict[str, list[Any]] = defaultdict(list)
         for doc in documents:
-            parent = str(Path(doc.path).parent)
-            docs_by_dir[parent].append(doc)
+            docs_by_dir[str(Path(doc.path).parent)].append(doc)
 
-        # Pre-compute counts by path prefix for recursive counts
         count_by_prefix: dict[str, int] = defaultdict(int)
         for doc in documents:
-            # Add to count for each parent directory in the path
-            path = doc.path
-            for prefix_path in [str(Path(path).parents[i]) for i in range(len(Path(path).parents))]:
-                count_by_prefix[prefix_path] += 1
+            for parent in Path(doc.path).parents:
+                count_by_prefix[str(parent)] += 1
 
         return dict(docs_by_dir), dict(count_by_prefix)
 
-    @app.tool
-    async def get_library_sections(
-        context: Context,
-        include_file_counts: Annotated[bool, "Include document counts per section"] = True,
-    ) -> dict[str, Any]:
-        """
-        Get a simplified view of library sections for adding new content.
-
-        THIS IS THE PRIMARY TOOL TO USE BEFORE ADDING CONTENT.
-
-        Returns all available locations where content can be stored, organized
-        by source. Each section includes:
-        - The full path to use with add_to_library()
-        - A description based on existing content
-        - Document counts to understand section size
-
-        Use this to:
-        1. Discover where different types of content belong
-        2. Get the exact path needed for add_to_library(directory=...)
-        3. Understand the library's organizational structure
-
-        Example workflow:
-        1. Call get_library_sections() to see available locations
-        2. Choose the appropriate section based on content type
-        3. Call add_to_library(content=..., title=..., directory=<path from step 1>)
-        """
+    def _view_sections(include_file_counts: bool) -> OverviewResult:
+        """Build the SECTIONS view: top-level subdirs per source with doc counts."""
         sources = _get_sources_config()
         if not sources:
-            return {
-                "sections": [],
-                "message": "No sources registered. Use 'libr add <path>' to add a source.",
-                "default_path": DOCUMENTS_PATH,
-            }
+            return OverviewResult(
+                view=LibraryView.SECTIONS.value,
+                sections=[],
+                total_sources=0,
+                message="No sources registered. Use 'libr add <path>' to add a source.",
+                default_path=DOCUMENTS_PATH,
+            )
 
         db = get_database()
-        all_documents = db.list_documents()
+        docs_by_dir, count_by_prefix = _build_directory_doc_index(db.list_documents())
 
-        # Build efficient lookup indexes once
-        docs_by_dir, count_by_prefix = _build_directory_doc_index(all_documents)
-
-        sections = []
-
+        blocks: list[OverviewSourceBlock] = []
         for source in sources:
             source_path = Path(source.get("path", ""))
             source_name = source.get("name", source_path.name)
             source_path_str = str(source_path)
 
             if not source_path.exists():
-                sections.append({
-                    "source": source_name,
-                    "path": source_path_str,
-                    "available": False,
-                    "error": "Source path does not exist",
-                })
+                blocks.append(
+                    OverviewSourceBlock(
+                        source=source_name,
+                        available=False,
+                        path=source_path_str,
+                        error="Source path does not exist",
+                    )
+                )
                 continue
 
-            # For file sources, just list the file
             if source.get("is_file"):
-                sections.append({
-                    "source": source_name,
-                    "path": str(source_path.parent),
-                    "available": True,
-                    "type": "file",
-                    "description": f"Single file: {source_path.name}",
-                })
+                blocks.append(
+                    OverviewSourceBlock(
+                        source=source_name,
+                        available=True,
+                        path=str(source_path.parent),
+                        type="file",
+                        description=f"Single file: {source_path.name}",
+                    )
+                )
                 continue
 
-            # Get top-level directories and their doc counts
-            source_sections = []
+            root_section: OverviewSection = OverviewSection(
+                name=f"{source_name} (root)",
+                path=source_path_str,
+                description="Root level of this source",
+            )
+            if include_file_counts:
+                root_section["document_count"] = len(docs_by_dir.get(source_path_str, []))
+            sub_sections: list[OverviewSection] = [root_section]
 
-            # Count docs directly in source root (O(1) lookup)
-            root_direct_docs = docs_by_dir.get(source_path_str, [])
-            # Count all docs under source (O(1) lookup)
-            total_source_docs = count_by_prefix.get(source_path_str, 0)
-
-            source_sections.append({
-                "name": source_name + " (root)",
-                "path": source_path_str,
-                "document_count": len(root_direct_docs) if include_file_counts else None,
-                "description": "Root level of this source",
-            })
-
-            # Get subdirectories
             try:
                 for item in sorted(source_path.iterdir()):
-                    if item.name.startswith("."):
-                        continue
-                    if not item.is_dir():
+                    if item.name.startswith(".") or not item.is_dir():
                         continue
 
                     item_str = str(item)
-
-                    # O(1) count lookup instead of O(n) list comprehension
                     dir_doc_count = count_by_prefix.get(item_str, 0)
-
-                    # Get sample titles from direct children only
                     direct_docs = docs_by_dir.get(item_str, [])
                     sample_titles = [d.title for d in direct_docs[:3] if d.title]
 
@@ -1326,7 +1217,6 @@ if ENABLE_OPTIONAL_TOOLS:
                     if sample_titles:
                         description += f" (e.g., {', '.join(sample_titles[:2])})"
 
-                    # Check for nested subdirectories
                     try:
                         subdirs = [
                             p.name
@@ -1336,45 +1226,190 @@ if ENABLE_OPTIONAL_TOOLS:
                     except PermissionError:
                         subdirs = []
 
-                    section_info: dict[str, Any] = {
-                        "name": item.name,
-                        "path": item_str,
-                        "description": description,
-                    }
-
+                    section: OverviewSection = OverviewSection(
+                        name=item.name,
+                        path=item_str,
+                        description=description,
+                    )
                     if include_file_counts:
-                        section_info["document_count"] = dir_doc_count
-
+                        section["document_count"] = dir_doc_count
                     if subdirs:
-                        section_info["has_subdirectories"] = True
-                        section_info["subdirectories"] = subdirs[:10]
-
-                    source_sections.append(section_info)
-
+                        section["has_subdirectories"] = True
+                        section["subdirectories"] = subdirs[:10]
+                    sub_sections.append(section)
             except PermissionError:
                 pass
 
-            sections.append({
-                "source": source_name,
-                "source_path": source_path_str,
-                "available": True,
-                "type": "directory",
-                "sections": source_sections,
-                "total_documents": total_source_docs if include_file_counts else None,
-            })
+            blocks.append(
+                OverviewSourceBlock(
+                    source=source_name,
+                    available=True,
+                    source_path=source_path_str,
+                    type="directory",
+                    sections=sub_sections,
+                    total_documents=(
+                        count_by_prefix.get(source_path_str, 0) if include_file_counts else None
+                    ),
+                )
+            )
 
-        return {
-            "sections": sections,
-            "total_sources": len(sources),
-            "usage_hint": "Use the 'path' value from any section as the 'directory' parameter in add_to_library()",
-        }
+        return OverviewResult(
+            view=LibraryView.SECTIONS.value,
+            sections=blocks,
+            total_sources=len(sources),
+            usage_hint=(
+                "Use the 'path' value from any section as the 'directory' "
+                "parameter in add_to_library()"
+            ),
+        )
 
-    @app.tool
+    def _view_stats() -> OverviewResult:
+        """Build the STATS view: library totals + active configuration."""
+        stats = get_database().get_stats()
+        return OverviewResult(
+            view=LibraryView.STATS.value,
+            document_count=stats["document_count"],
+            chunk_count=stats["chunk_count"],
+            embedding_count=stats["embedding_count"],
+            config=LibraryConfig(
+                documents_path=DOCUMENTS_PATH,
+                chunk_size=CHUNK_SIZE,
+                chunk_overlap=CHUNK_OVERLAP,
+                search_limit=SEARCH_LIMIT,
+                mmr_lambda=MMR_LAMBDA,
+                hybrid_alpha=HYBRID_ALPHA,
+            ),
+        )
+
+    def _build_tree(path: Path, current_depth: int, max_depth: int) -> TreeNode:
+        """Recursively build a directory tree, capped at max_depth."""
+        if not path.exists():
+            return TreeNode(
+                name=path.name, type="directory", path=str(path), error="Path does not exist"
+            )
+        if path.is_file():
+            return TreeNode(name=path.name, type="file", path=str(path))
+
+        node: TreeNode = TreeNode(name=path.name, type="directory", path=str(path))
+
+        if current_depth >= max_depth:
+            try:
+                items = list(path.iterdir())
+                node["subdirectory_count"] = sum(
+                    1 for p in items if p.is_dir() and not p.name.startswith(".")
+                )
+                node["file_count"] = sum(1 for p in items if p.is_file() and p.suffix == ".md")
+            except PermissionError:
+                node["error"] = "Permission denied"
+            return node
+
+        # children is typed list[dict] in TreeNode (to keep arcade's pydantic
+        # schema generator from recursing on the self-reference); at runtime
+        # each entry is a TreeNode-shaped dict.
+        try:
+            children: list[dict[str, Any]] = []
+            for item in sorted(path.iterdir()):
+                if item.name.startswith("."):
+                    continue
+                if item.is_dir():
+                    children.append(dict(_build_tree(item, current_depth + 1, max_depth)))
+                elif item.suffix == ".md":
+                    children.append(dict(TreeNode(name=item.name, type="file", path=str(item))))
+            node["children"] = children
+        except PermissionError:
+            node["error"] = "Permission denied"
+        return node
+
+    def _view_tree(depth: int) -> OverviewResult:
+        """Build the TREE view: recursive filesystem walk per source."""
+        sources = _get_sources_config()
+        if not sources:
+            return OverviewResult(
+                view=LibraryView.TREE.value,
+                sources=[],
+                total_sources=0,
+                message="No sources registered.",
+            )
+
+        source_blocks: list[TreeSourceBlock] = []
+        for source in sources:
+            source_path = Path(source.get("path", ""))
+            source_name = source.get("name", source_path.name)
+            if not source_path.exists():
+                source_blocks.append(
+                    TreeSourceBlock(
+                        name=source_name,
+                        path=str(source_path),
+                        exists=False,
+                        error="Source path does not exist",
+                    )
+                )
+                continue
+            source_blocks.append(
+                TreeSourceBlock(
+                    name=source_name,
+                    path=str(source_path),
+                    exists=True,
+                    is_file=source.get("is_file", False),
+                    structure=_build_tree(source_path, 0, depth),
+                )
+            )
+        return OverviewResult(
+            view=LibraryView.TREE.value,
+            sources=source_blocks,
+            total_sources=len(sources),
+        )
+
+    @app.tool(metadata=ToolMetadata(behavior=_READ_ONLY_BEHAVIOR))  # type: ignore[arg-type]
+    async def get_library_overview(
+        context: Context,
+        view: Annotated[
+            LibraryView,
+            "Which slice of the library to return: 'sections' (top-level subdirs with "
+            "doc counts and sample titles — best for choosing where to add content), "
+            "'stats' (library totals and current config), or 'tree' (recursive "
+            "filesystem walk, depth-controlled).",
+        ] = LibraryView.SECTIONS,
+        depth: Annotated[
+            int,
+            "How many directory levels to show. Only applies when view='tree'; "
+            "ignored otherwise. 1 = top-level children only.",
+        ] = 1,
+    ) -> OverviewResult:
+        """
+        Inspect the library structure.
+
+        THIS IS THE PRIMARY TOOL TO INSPECT THE LIBRARY BEFORE ADDING CONTENT.
+
+        Three views are available:
+        - 'sections' (default): top-level subdirectories of each source with
+          document counts and sample titles. Each section's path is what you
+          pass as `directory` to add_to_library(). Use this when you want to
+          place new content somewhere sensible.
+        - 'stats': aggregate document/chunk counts and the current chunking +
+          search configuration. Use this for "how big is my library?".
+        - 'tree': recursive filesystem tree per source, capped at `depth`.
+          Use this when you need to browse organization in detail.
+
+        Example workflow for adding content:
+        1. Call get_library_overview() to see available locations
+        2. Pick the path of the right section
+        3. Call add_to_library(content=..., title=..., directory=<that path>)
+        """
+        if view is None:
+            view = LibraryView.SECTIONS
+        if view == LibraryView.STATS:
+            return _view_stats()
+        if view == LibraryView.TREE:
+            return _view_tree(depth)
+        return _view_sections(include_file_counts=True)
+
+    @app.tool(metadata=ToolMetadata(behavior=_READ_ONLY_BEHAVIOR))  # type: ignore[arg-type]
     async def suggest_library_location(
         context: Context,
         title: Annotated[str, "The title of the content you want to add"],
         content_summary: Annotated[str, "A brief description of what the content is about"] = "",
-    ) -> dict[str, Any]:
+    ) -> SuggestResult:
         """
         Get suggestions for where to store new content in the library.
 
@@ -1383,103 +1418,96 @@ if ENABLE_OPTIONAL_TOOLS:
 
         Returns ranked suggestions with paths ready to use with add_to_library().
         """
+        from librarian.tool_outputs import LocationSuggestion, SimilarDocument
+
         sources = _get_sources_config()
         if not sources:
-            return {
-                "suggestions": [],
-                "message": "No sources configured",
-                "default_path": DOCUMENTS_PATH,
-            }
+            return SuggestResult(
+                title=title,
+                suggestions=[],
+                message="No sources configured",
+                default_path=DOCUMENTS_PATH,
+            )
 
-        # Build search query from title and summary
-        search_query = title
-        if content_summary:
-            search_query = f"{title} {content_summary}"
+        search_query = f"{title} {content_summary}".strip()
 
-        # Search for similar content to find where related docs are stored
-        # Try hybrid search first, fall back to keyword-only if embeddings fail
+        # Try hybrid search first; fall back through keyword to none.
         searcher = _get_searcher()
         search_method = "hybrid"
         try:
             similar_results = searcher.search(search_query, limit=10, use_mmr=True)
         except Exception as e:
-            # Embedding service unavailable - fall back to keyword search
             logger.warning("Hybrid search failed, falling back to keyword search: %s", e)
             try:
                 similar_results = searcher.keyword_search(search_query, limit=10)
                 search_method = "keyword"
             except Exception:
-                # Even keyword search failed - return source suggestions only
                 similar_results = []
                 search_method = "none"
 
-        # Analyze where similar documents are located
+        # Aggregate by parent directory.
         location_scores: dict[str, dict[str, Any]] = {}
-
         for result in similar_results:
             doc_path = Path(result.document_path)
             parent_dir = str(doc_path.parent)
-
             if parent_dir not in location_scores:
-                # Find which source this belongs to
                 source = _find_source_for_path(doc_path, sources)
-                source_name = source.get("name") if source else "Unknown"
-
                 location_scores[parent_dir] = {
                     "path": parent_dir,
-                    "source": source_name,
-                    "score": 0,
+                    "source": source.get("name") if source else "Unknown",
+                    "score": 0.0,
                     "similar_docs": [],
                     "breadcrumb": _build_breadcrumb(doc_path.parent, source),
                 }
-
             location_scores[parent_dir]["score"] += result.score
             if len(location_scores[parent_dir]["similar_docs"]) < 3:
-                location_scores[parent_dir]["similar_docs"].append({
-                    "title": Path(result.document_path).stem,
-                    "relevance": round(result.score, 3),
-                })
+                location_scores[parent_dir]["similar_docs"].append(
+                    SimilarDocument(
+                        title=Path(result.document_path).stem,
+                        relevance=round(result.score, 3),
+                    )
+                )
 
-        # Sort by score and build suggestions
         sorted_locations = sorted(location_scores.values(), key=lambda x: x["score"], reverse=True)
-
-        # Normalize confidence relative to the best score
         max_score = sorted_locations[0]["score"] if sorted_locations else 1.0
 
-        suggestions = []
-        for loc in sorted_locations[:5]:
-            # Confidence is relative to best match (0.0 to 1.0)
-            confidence = loc["score"] / max_score if max_score > 0 else 0.0
-            suggestions.append({
-                "path": loc["path"],
-                "source": loc["source"],
-                "confidence": round(confidence, 2),
-                "breadcrumb_display": " → ".join(loc["breadcrumb"]),
-                "reason": f"Similar to: {', '.join(d['title'] for d in loc['similar_docs'])}",
-                "similar_documents": loc["similar_docs"],
-            })
+        suggestions: list[LocationSuggestion] = [
+            LocationSuggestion(
+                path=loc["path"],
+                source=loc["source"],
+                confidence=round(loc["score"] / max_score if max_score > 0 else 0.0, 2),
+                breadcrumb_display=" → ".join(loc["breadcrumb"]),
+                reason=f"Similar to: {', '.join(d['title'] for d in loc['similar_docs'])}",
+                similar_documents=loc["similar_docs"],
+            )
+            for loc in sorted_locations[:5]
+        ]
 
-        # If no suggestions from search, list available sources
+        # Fall back to source roots if no semantic matches.
         if not suggestions:
             for source in sources:
                 if source.get("is_file"):
                     continue
                 source_path = source.get("path", "")
                 if Path(source_path).exists():
-                    suggestions.append({
-                        "path": source_path,
-                        "source": source.get("name", source_path),
-                        "confidence": 0.5,
-                        "breadcrumb_display": source.get("name", source_path),
-                        "reason": "No similar content found - suggesting source roots",
-                    })
+                    suggestions.append(
+                        LocationSuggestion(
+                            path=source_path,
+                            source=source.get("name", source_path),
+                            confidence=0.5,
+                            breadcrumb_display=source.get("name", source_path),
+                            reason="No similar content found - suggesting source roots",
+                        )
+                    )
 
-        return {
-            "title": title,
-            "suggestions": suggestions,
-            "search_method": search_method,
-            "usage_hint": "Use the suggested 'path' as the 'directory' parameter in add_to_library()",
-        }
+        return SuggestResult(
+            title=title,
+            suggestions=suggestions,
+            search_method=search_method,
+            usage_hint=(
+                "Use the suggested 'path' as the 'directory' parameter in add_to_library()"
+            ),
+        )
 
 
 # =============================================================================
