@@ -1,6 +1,6 @@
 [project]
 name = "agent-library"
-version = "0.12.0"
+version = "0.13.0"
 description = "Multi-modal knowledge library with vector and full-text search for text, code, images, and PDFs"
 readme = "README.md"
 license = "MIT"
