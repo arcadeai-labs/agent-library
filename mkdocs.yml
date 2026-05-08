@@ -1,0 +1,82 @@
+site_name: Agent Library
+site_description: A personal knowledge library for AI agents — store and search notes, code, PDFs, and images.
+site_url: https://arcadeai.github.io/agent-library/
+repo_url: https://github.com/ArcadeAI/agent-library
+repo_name: ArcadeAI/agent-library
+edit_uri: edit/main/docs/
+
+docs_dir: docs
+
+theme:
+  name: material
+  features:
+    - navigation.instant
+    - navigation.tracking
+    - navigation.sections
+    - navigation.top
+    - search.suggest
+    - search.highlight
+    - content.code.copy
+    - content.action.edit
+    - toc.follow
+  palette:
+    - media: "(prefers-color-scheme: light)"
+      scheme: default
+      primary: indigo
+      accent: indigo
+      toggle:
+        icon: material/weather-night
+        name: Switch to dark mode
+    - media: "(prefers-color-scheme: dark)"
+      scheme: slate
+      primary: indigo
+      accent: indigo
+      toggle:
+        icon: material/weather-sunny
+        name: Switch to light mode
+  font:
+    text: Inter
+    code: JetBrains Mono
+  icon:
+    repo: fontawesome/brands/github
+
+markdown_extensions:
+  - admonition
+  - attr_list
+  - def_list
+  - footnotes
+  - md_in_html
+  - tables
+  - toc:
+      permalink: true
+  - pymdownx.details
+  - pymdownx.highlight:
+      anchor_linenums: true
+      line_spans: __span
+      pygments_lang_class: true
+  - pymdownx.inlinehilite
+  - pymdownx.snippets
+  - pymdownx.superfences
+  - pymdownx.tabbed:
+      alternate_style: true
+  - pymdownx.tasklist:
+      custom_checkbox: true
+  - pymdownx.keys
+
+nav:
+  - Home: index.md
+  - Quickstart: quickstart.md
+  - Install:
+      - Installing uv: install.md
+  - Use it with your AI:
+      - Claude Desktop: integrations/claude-desktop.md
+      - Claude Code (CLI): integrations/claude-code.md
+      - Cursor: integrations/cursor.md
+  - CLI reference: cli.md
+  - Concepts: concepts.md
+  - Troubleshooting: troubleshooting.md
+
+extra:
+  social:
+    - icon: fontawesome/brands/github
+      link: https://github.com/ArcadeAI/agent-library
