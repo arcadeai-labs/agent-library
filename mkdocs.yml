@@ -9,8 +9,12 @@ docs_dir: docs
 
 theme:
   name: material
-  logo: assets/logo.svg
-  favicon: assets/favicon.jpg
+  # Identity is "Agent Library" (the site_name) rendered as the header text;
+  # the brand vibe comes from the cyan accent + dark theme defined below and
+  # in docs/assets/extra.css, not from a borrowed wordmark.
+  icon:
+    logo: material/bookshelf
+    repo: fontawesome/brands/github
   features:
     - navigation.instant
     - navigation.tracking
@@ -43,8 +47,6 @@ theme:
   font:
     text: Inter
     code: JetBrains Mono
-  icon:
-    repo: fontawesome/brands/github
 
 extra_css:
   - assets/extra.css

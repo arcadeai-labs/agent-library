@@ -84,10 +84,12 @@
   color: var(--arcade-cyan);
 }
 
-/* Code blocks: match the navy surface tone. */
+/* Code: navy surface tone, body color text. Earlier draft tinted inline
+ * `code` cyan, which made every backticked term in prose loud and wore
+ * down the eye fast. Cyan stays reserved for links and accents. */
 [data-md-color-scheme="slate"] .md-typeset code {
   background-color: var(--arcade-surface-2);
-  color: var(--arcade-cyan);
+  color: var(--arcade-fg);
   border-radius: 3px;
 }
 [data-md-color-scheme="slate"] .md-typeset pre > code {
