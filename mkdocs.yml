@@ -73,6 +73,7 @@ nav:
       - Claude Code (CLI): integrations/claude-code.md
       - Cursor: integrations/cursor.md
   - CLI reference: cli.md
+  - Configuration: configuration.md
   - Concepts: concepts.md
   - Troubleshooting: troubleshooting.md
 
