@@ -9,6 +9,8 @@ docs_dir: docs
 
 theme:
   name: material
+  logo: assets/logo.svg
+  favicon: assets/favicon.jpg
   features:
     - navigation.instant
     - navigation.tracking
@@ -19,26 +21,33 @@ theme:
     - content.code.copy
     - content.action.edit
     - toc.follow
+  # Brand-aligned palette: dark is the primary experience (matches arcade.dev),
+  # light is offered as an alternate. The actual hex values come from the
+  # custom CSS in docs/assets/extra.css — these palette entries just pin the
+  # right Material scheme + a brand-adjacent base color.
   palette:
-    - media: "(prefers-color-scheme: light)"
-      scheme: default
-      primary: indigo
-      accent: indigo
-      toggle:
-        icon: material/weather-night
-        name: Switch to dark mode
     - media: "(prefers-color-scheme: dark)"
       scheme: slate
-      primary: indigo
-      accent: indigo
+      primary: black
+      accent: cyan
       toggle:
         icon: material/weather-sunny
         name: Switch to light mode
+    - media: "(prefers-color-scheme: light)"
+      scheme: default
+      primary: black
+      accent: cyan
+      toggle:
+        icon: material/weather-night
+        name: Switch to dark mode
   font:
     text: Inter
     code: JetBrains Mono
   icon:
     repo: fontawesome/brands/github
+
+extra_css:
+  - assets/extra.css
 
 markdown_extensions:
   - admonition
