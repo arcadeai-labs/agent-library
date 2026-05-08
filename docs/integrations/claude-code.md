@@ -43,6 +43,18 @@ You should see `librarian` listed.
     }
     ```
 
+??? tip "Already ran `uv tool install`?"
+    Claude Code is a terminal app, so it inherits your shell `PATH`. That means once you've done `uv tool install`, the simpler form works too:
+
+    ```json
+    "librarian": {
+      "command": "librarian",
+      "args": ["serve", "stdio"]
+    }
+    ```
+
+    `uvx` is still our default in the docs because it's hermetic and doesn't depend on the install state.
+
 ## Use it
 
 Start (or restart) Claude Code. In your conversation:

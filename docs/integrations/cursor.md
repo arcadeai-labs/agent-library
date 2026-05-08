@@ -36,6 +36,18 @@ If the file is empty or freshly skeletoned, paste this:
 
 If you already have other MCP servers in there, add `"librarian"` as another key under `mcpServers`. Save the file.
 
+??? tip "Already ran `uv tool install`?"
+    Cursor inherits more of your environment than Claude Desktop, so the simpler form usually works once you've installed the binary globally:
+
+    ```json
+    "librarian": {
+      "command": "librarian",
+      "args": ["serve", "stdio"]
+    }
+    ```
+
+    If Cursor reports "command not found", switch back to the `uvx` form above (or use the absolute path from `which librarian`).
+
 ## 3. Reload Cursor
 
 Either fully quit and reopen Cursor, or run **"Developer: Reload Window"** from the command palette. Cursor re-reads `mcp.json` on each reload.

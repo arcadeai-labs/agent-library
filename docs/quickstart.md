@@ -5,36 +5,36 @@ Five minutes from zero to "my AI can search my notes". You'll do all of this fro
 !!! note "Before you start"
     Make sure `uv --version` works in your terminal. If not, do **[Install uv](install.md)** first (one command).
 
-## 1. Run Agent Library for the first time
+## 1. Install Agent Library
 
 Paste this into your terminal:
 
 ```bash
-uvx --from "agent-library[all]==0.13.0" librarian --help
+uv tool install "agent-library[all]==0.13.0"
 ```
 
-The first time you run this it'll spend a couple minutes downloading the Python package and its language models (~2 GB total). You only pay this cost **once** — `uv` caches everything afterward.
+This installs Agent Library as a regular command on your machine — like installing any other CLI tool. The first run downloads the Python package and its language models (~2 GB total). You only pay this cost **once**; `uv` caches everything afterward.
 
-When it finishes you'll see a help menu listing commands like `add`, `search`, `serve`. That confirms it's working.
+Verify it worked:
 
-!!! tip "Make this command shorter"
-    Typing `uvx --from "agent-library[all]==0.13.0" librarian` every time is annoying. Add an alias to your shell:
+```bash
+librarian --help
+```
 
-    === "macOS / Linux (zsh)"
+You should see a help menu listing commands like `add`, `search`, `serve`. From here on, you just type `librarian ...` like any other terminal tool.
 
-        ```bash
-        echo 'alias librarian="uvx --from \"agent-library[all]==0.13.0\" librarian"' >> ~/.zshrc
-        source ~/.zshrc
-        ```
+!!! tip "Updating later"
+    To pick up a new release:
 
-    === "macOS / Linux (bash)"
+    ```bash
+    uv tool upgrade agent-library
+    ```
 
-        ```bash
-        echo 'alias librarian="uvx --from \"agent-library[all]==0.13.0\" librarian"' >> ~/.bashrc
-        source ~/.bashrc
-        ```
+    To remove it:
 
-    From here on, this guide assumes you have the `librarian` alias. If you didn't set one, just substitute the long form.
+    ```bash
+    uv tool uninstall agent-library
+    ```
 
 ## 2. Index a folder of notes
 

@@ -16,7 +16,7 @@ Add that line to `~/.zshrc` or `~/.bashrc` to make it stick.
 
 ## First run is taking forever
 
-The first `uvx --from "agent-library[all]==0.13.0"` invocation downloads:
+The first `uv tool install "agent-library[all]==0.13.0"` (or `uvx ...` invocation) downloads:
 
 - The Agent Library package
 - `sentence-transformers` and `torch` (~500 MB)
@@ -45,7 +45,8 @@ Claude Desktop has an internal timeout for MCP server startup. If your first run
 **Fix:** Warm the cache once at the terminal first:
 
 ```bash
-uvx --from "agent-library[all]==0.13.0" librarian --help
+uv tool install "agent-library[all]==0.13.0"
+librarian --help
 ```
 
 Then restart Claude. The next launch will reuse the cached install.

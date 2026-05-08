@@ -70,6 +70,18 @@ If the file already has content, just add the `"librarian": { ... }` block insid
 
 Save the file.
 
+??? tip "Already ran `uv tool install`?"
+    If you went through the [Quickstart](../quickstart.md) and installed Agent Library globally with `uv tool install`, you can swap the `uvx` form for the installed binary directly. **You'll need to use the absolute path** because Claude Desktop is launched by macOS's `launchd` and doesn't inherit your terminal's `PATH`:
+
+    ```json
+    "librarian": {
+      "command": "/Users/YOUR-USERNAME/.local/bin/librarian",
+      "args": ["serve", "stdio"]
+    }
+    ```
+
+    Find your absolute path with `which librarian` in the terminal. The `uvx` form doesn't have this caveat, which is why we recommend it as the default.
+
 ## 3. Restart Claude Desktop
 
 Quit Claude entirely (right-click the dock icon → Quit, or <kbd>Cmd</kbd>+<kbd>Q</kbd>) and reopen it. Claude only re-reads the config on launch.
