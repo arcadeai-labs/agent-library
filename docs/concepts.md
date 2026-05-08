@@ -12,6 +12,7 @@ Agent Library tags every file with an **asset type**:
 | `code` | Source code (Python, JS, TS, Go, Rust, …) | regex-based symbol extractor |
 | `pdf` | PDF documents | requires `pypdf` (in `[all]` extras) |
 | `image` | PNG, JPG, GIF, WEBP | requires `Pillow` (in `[all]` extras) |
+| `multimodal` | Reserved for documents that mix modalities (none of today's parsers emit this — but the enum value exists for forward compatibility, and `--asset_type=multimodal` is accepted as a filter) | — |
 
 When you search, the asset type is preserved on every result. You can filter on it:
 

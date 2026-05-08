@@ -5,7 +5,7 @@ Cursor supports MCP servers natively as of late 2024. Hooking up Agent Library l
 ## Prerequisites
 
 - You ran the [Quickstart](../quickstart.md) and have at least one folder indexed.
-- Cursor 0.45 or newer (MCP support shipped in that release).
+- A version of Cursor with built-in MCP support (visible as a **MCP** tab in Settings).
 
 ## 1. Open the MCP settings
 

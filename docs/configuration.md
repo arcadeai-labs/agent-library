@@ -6,32 +6,41 @@ Every knob Agent Library exposes, what it does, what its default is, and **how t
 
 ## How to change a setting
 
-Every setting is read from an environment variable at startup. There are three common ways to set those vars:
+There are four ways to apply a setting. Pick the one that matches your situation.
+
+=== "`librarian config set` (recommended)"
+
+    The simplest path. Settings are persisted to `~/.librarian/settings.json` and survive across sessions:
+
+    ```bash
+    librarian config set EMBEDDING_MODEL "BAAI/bge-base-en-v1.5"
+    librarian config set EMBEDDING_DIMENSION 768
+    librarian config set HYBRID_ALPHA 0.5
+    ```
+
+    Inspect the current state:
+
+    ```bash
+    librarian config show       # table of every setting + where each came from
+    librarian config get HYBRID_ALPHA
+    librarian config path       # show the four config-file paths
+    librarian config edit       # open settings.json in your editor
+    librarian config reset      # back to defaults
+    ```
+
+    Restart `librarian serve` (or your AI client) after changing anything.
 
 === "From the terminal (one-off)"
 
-    Prefix any `librarian` command:
+    Prefix any `librarian` command with an env var. Useful for trying a setting without committing to it:
 
     ```bash
     HYBRID_ALPHA=0.5 librarian search "deploy notes"
     ```
 
-    Useful for testing tweaks without committing to them.
-
-=== "From the terminal (permanent)"
-
-    Add to your shell profile (`~/.zshrc`, `~/.bashrc`, etc.):
-
-    ```bash
-    export DATABASE_PATH="$HOME/Documents/librarian.db"
-    export EMBEDDING_MODEL="BAAI/bge-base-en-v1.5"
-    ```
-
-    `source` the file or open a new terminal for changes to take effect.
-
 === "Inside Claude Desktop / Cursor / Claude Code"
 
-    The MCP server runs in its own subprocess that doesn't see your shell's env vars. You set them in the `env` block of the MCP config:
+    The MCP server is a subprocess, so settings the AI host should know about live in the `env` block of the MCP config:
 
     ```json
     {
@@ -44,6 +53,7 @@ Every setting is read from an environment variable at startup. There are three c
           ],
           "env": {
             "EMBEDDING_MODEL": "BAAI/bge-base-en-v1.5",
+            "EMBEDDING_DIMENSION": "768",
             "MMR_LAMBDA": "0.5"
           }
         }
@@ -65,7 +75,22 @@ Every setting is read from an environment variable at startup. There are three c
 
     Agent Library reads it automatically on startup.
 
-!!! warning "All values must be strings"
+=== "Permanent shell var"
+
+    Less recommended (env is invisible to GUI apps), but works if everything you care about is terminal-only. Add to `~/.zshrc` or `~/.bashrc`:
+
+    ```bash
+    export DATABASE_PATH="$HOME/Documents/librarian.db"
+    export EMBEDDING_MODEL="BAAI/bge-base-en-v1.5"
+    ```
+
+!!! info "Precedence (highest wins)"
+    1. Process env vars (`HYBRID_ALPHA=0.5 librarian ...`)
+    2. `.env` file in CWD
+    3. `librarian config set` (in `~/.librarian/settings.json`)
+    4. Built-in defaults
+
+!!! warning "All values must be strings inside JSON"
     JSON env blocks expect `"true"` and `"0.7"`, not `true` or `0.7`. Boolean values that count as "true": `true`, `1`, `yes`, `on` (case-insensitive). Anything else is false.
 
 ---
@@ -171,7 +196,6 @@ The vision path activates when the model name contains `clip` or `siglip`.
 | `clip-ViT-B-32` *(default)* | 512 | 600 MB | Original CLIP base, fast | [→](https://huggingface.co/sentence-transformers/clip-ViT-B-32) |
 | `clip-ViT-B-16` | 512 | 600 MB | Higher resolution patches than B-32 — slightly better, slightly slower | [→](https://huggingface.co/sentence-transformers/clip-ViT-B-16) |
 | `clip-ViT-L-14` | 768 | 1.7 GB | Large CLIP — best image quality, expensive | [→](https://huggingface.co/sentence-transformers/clip-ViT-L-14) |
-| `clip-ViT-L-14-336` | 768 | 1.7 GB | L-14 finetuned for higher input resolution | [→](https://huggingface.co/sentence-transformers/clip-ViT-L-14-336) |
 
 !!! tip "Indexing screenshots only?"
     `clip-ViT-B-32` is plenty. The L-14 variants only pay off with photographic content where fine detail matters.

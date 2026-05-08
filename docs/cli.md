@@ -26,13 +26,19 @@ librarian add ~/notes
 | `-n NAME` / `--name` | Give the source a friendly name (defaults to the directory name) |
 | `-d N` / `--depth` | Limit recursion. `0` = the directory itself only. Default: unlimited |
 | `-p PATTERN` / `--pattern` | Glob filter (e.g. `'notes/*.md'`) |
+| `-e PATTERN` / `--exclude` | Glob to skip. Can be passed multiple times |
+| `--dry-run` | Show what would be indexed without doing anything |
+| `-v` / `--verbose` | Print every file as it's indexed |
 
 ```bash
 # Index just the top-level files of a folder
 librarian add ~/notes --depth 0
 
-# Index only Python files in a project
-librarian add ~/code/myproject --pattern '**/*.py'
+# Index only Python files in a project, excluding tests
+librarian add ~/code/myproject --pattern '**/*.py' --exclude '**/tests/**'
+
+# Preview without writing
+librarian add ~/notes --dry-run
 ```
 
 ---
@@ -131,13 +137,40 @@ librarian serve http --port 7878   # for HTTP-based MCP clients
 
 Three command groups bundle less-common operations:
 
+### `librarian config`
+
+The most useful of the three. **Persist config changes** to `~/.librarian/settings.json` so they survive across sessions:
+
 ```bash
-librarian index --help    # index inspection / rebuild operations
-librarian docs --help     # per-document operations (read, update, remove single docs)
-librarian config --help   # show or change configuration values
+librarian config show               # table of every setting with source attribution
+librarian config get HYBRID_ALPHA   # one value
+librarian config set HYBRID_ALPHA 0.5
+librarian config path               # show the four config-file locations
+librarian config edit               # open settings.json in your editor
+librarian config models             # check / download embedding models
+librarian config reset              # back to defaults
 ```
 
-These are in the help output but used less often than the top-level commands above.
+See [Configuration](configuration.md) for the full list of settable keys.
+
+### `librarian index`
+
+Lower-level index operations:
+
+```bash
+librarian index build      # rebuild the entire index from scratch
+librarian index clean      # remove all indexed data (keeps sources list)
+librarian index clobber    # remove everything and reinitialize the database
+```
+
+### `librarian docs`
+
+Per-document operations:
+
+```bash
+librarian docs list        # list every indexed document
+librarian docs search "title text"   # search by title only (not contents)
+```
 
 ---
 

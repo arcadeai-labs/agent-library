@@ -9,16 +9,13 @@ Claude Code is the terminal-based version of Claude. It uses the same MCP server
 
 ## Add Agent Library
 
-Claude Code has a one-line command to register an MCP server. From any directory:
+Claude Code has a one-line command to register an MCP server. The `--` separator tells Claude where the command-and-args to invoke begin:
 
 ```bash
-claude mcp add librarian \
-  --command "uvx" \
-  --args "--from" --args "agent-library[all]==0.13.0" \
-       --args "librarian" --args "serve" --args "stdio"
+claude mcp add librarian -- uvx --from "agent-library[all]==0.13.0" librarian serve stdio
 ```
 
-That writes the entry into `~/.claude/settings.json` (or your project-local equivalent). Verify:
+That writes the entry into `~/.claude.json` (or your project-local equivalent depending on `--scope`). Verify:
 
 ```bash
 claude mcp list
@@ -63,27 +60,32 @@ Start (or restart) Claude Code. In your conversation:
 
 The first response triggers the MCP tool. You'll be prompted to allow `Librarian_SearchLibrary` — accept it once and Claude Code remembers.
 
-## Project-scoped vs. user-scoped
+## Scope: local, project, or user
 
-By default the entry above goes into your **user-level** Claude config so it's available from every directory. If you'd rather have a per-project Agent Library (different index for different projects), pass `--scope local`:
+`claude mcp add` accepts a `--scope` flag (default: `local`):
+
+| Scope | Where it's stored | When you'd use it |
+|---|---|---|
+| `local` *(default)* | `.claude.json` for the current project — only you see it | Trying things out, personal experiments |
+| `project` | `.mcp.json` at the repo root, checked into git | Sharing a server config with the whole team |
+| `user` | `~/.claude.json` — visible from every directory | One library you use across all your projects |
+
+For a personal library available everywhere:
 
 ```bash
-claude mcp add librarian --scope local \
-  --command "uvx" \
-  --args "--from" --args "agent-library[all]==0.13.0" \
-       --args "librarian" --args "serve" --args "stdio"
+claude mcp add librarian --scope user -- uvx --from "agent-library[all]==0.13.0" librarian serve stdio
 ```
 
-That writes to `.claude/settings.json` next to your project, and you can point at a project-specific database:
+For a project-specific library with its own database:
 
 ```bash
-claude mcp add librarian --scope local \
-  --command "uvx" \
-  --args "--from" --args "agent-library[all]==0.13.0" \
-       --args "librarian" --args "serve" --args "stdio" \
-  --env "DATABASE_PATH=$(pwd)/.librarian/index.db" \
-  --env "DOCUMENTS_PATH=$(pwd)"
+claude mcp add librarian \
+  -e "DATABASE_PATH=$(pwd)/.librarian/index.db" \
+  -e "DOCUMENTS_PATH=$(pwd)" \
+  -- uvx --from "agent-library[all]==0.13.0" librarian serve stdio
 ```
+
+Pass `-e KEY=VALUE` once per env var (it can be repeated).
 
 ## Removing it
 

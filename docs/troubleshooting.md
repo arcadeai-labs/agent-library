@@ -89,11 +89,17 @@ MMR_LAMBDA=0.3 librarian search "your query"   # heavily favor diversity (differ
 ## I want to wipe everything and start over
 
 ```bash
-rm -rf ~/.librarian
+rm -rf ~/.librarian          # database, sources list, settings.json
 uv tool uninstall agent-library
 ```
 
-Then reinstall via Quickstart.
+Then reinstall via [Quickstart](quickstart.md).
+
+To reset just configuration (keeping your indexed content):
+
+```bash
+librarian config reset
+```
 
 ## I'm hitting permission errors writing to `~/.librarian`
 
