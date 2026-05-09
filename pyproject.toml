@@ -74,6 +74,10 @@ all = [
 evals = [
     "arcade-mcp[evals]>=1.14.0",
 ]
+docs = [
+    "mkdocs>=1.6.0",
+    "mkdocs-material>=9.5.0",
+]
 
 [build-system]
 requires = ["hatchling"]
