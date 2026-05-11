@@ -53,14 +53,14 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Install uv
+      - name: Install uv and Python ${{ matrix.python-version }}
         uses: astral-sh/setup-uv@v7
         with:
           version: "latest"
-
-      - name: Set up Python ${{ matrix.python-version }}
-        uses: actions/setup-python@v5
-        with:
+          # uv-managed Python (python-build-standalone) is compiled with
+          # --enable-loadable-sqlite-extensions on every platform, which the
+          # sqlite-vec extension requires. The python.org build used by
+          # actions/setup-python on macOS does not enable this.
           python-version: ${{ matrix.python-version }}
 
       - name: Install dependencies
