@@ -8,9 +8,9 @@ for different document formats (Markdown, Obsidian, etc.).
 import logging
 import signal
 from abc import ABC, abstractmethod
-from collections.abc import Callable
+from collections.abc import Iterator
+from contextlib import contextmanager
 from pathlib import Path
-from typing import Any, cast
 
 from librarian.types import ParsedDocument
 
@@ -33,37 +33,28 @@ def _timeout_handler(signum: int, frame: object) -> None:
     raise FileReadTimeoutError("File read timed out")
 
 
-def _signal_timeout_available() -> bool:
-    return hasattr(signal, "SIGALRM") and hasattr(signal, "alarm")
+@contextmanager
+def _read_timeout(timeout: int) -> Iterator[None]:
+    """Apply a POSIX alarm-based read timeout when available; no-op otherwise.
 
+    Windows Python does not expose ``signal.SIGALRM`` / ``signal.alarm``, so we
+    fall back to an unbounded read on those platforms rather than refusing to
+    parse the file at all.
+    """
+    sigalrm = getattr(signal, "SIGALRM", None)
+    alarm = getattr(signal, "alarm", None)
+    if sigalrm is None or alarm is None:
+        yield
+        return
 
-def _get_signal_timeout_hooks() -> tuple[Any, Callable[[int], object]]:
-    return vars(signal)["SIGALRM"], cast("Callable[[int], object]", vars(signal)["alarm"])
-
-
-def _read_text_with_fallback(
-    file_path: Path,
-    encoding: str,
-    fallback_encoding: str | None,
-) -> str:
+    old_handler = signal.getsignal(sigalrm)
+    signal.signal(sigalrm, _timeout_handler)
+    alarm(timeout)
     try:
-        return file_path.read_text(encoding=encoding)
-    except UnicodeDecodeError:
-        if fallback_encoding:
-            return file_path.read_text(encoding=fallback_encoding)
-        raise
-
-
-def _handle_read_error(file_path: Path, error: Exception) -> None:
-    if isinstance(error, FileReadTimeoutError):
-        raise error
-    if isinstance(error, FileNotFoundError):
-        raise error
-    if isinstance(error, PermissionError):
-        raise FileReadError(f"Permission denied: {file_path}") from error
-    if isinstance(error, OSError):
-        raise FileReadError(f"Cannot read {file_path}: {error}") from error
-    raise error
+        yield
+    finally:
+        alarm(0)
+        signal.signal(sigalrm, old_handler)
 
 
 def safe_read_text(
@@ -96,23 +87,14 @@ def safe_read_text(
         msg = f"File not found: {file_path}"
         raise FileNotFoundError(msg)
 
-    if not _signal_timeout_available():
-        try:
-            return _read_text_with_fallback(file_path, encoding, fallback_encoding)
-        except Exception as e:
-            _handle_read_error(file_path, e)
-            raise
-
-    sigalrm, alarm = _get_signal_timeout_hooks()
-    old_handler = signal.getsignal(sigalrm)
-    content: str | None = None
     try:
-        signal.signal(sigalrm, _timeout_handler)
-        alarm(timeout)
-
-        content = _read_text_with_fallback(file_path, encoding, fallback_encoding)
-
-        alarm(0)
+        with _read_timeout(timeout):
+            try:
+                return file_path.read_text(encoding=encoding)
+            except UnicodeDecodeError:
+                if fallback_encoding:
+                    return file_path.read_text(encoding=fallback_encoding)
+                raise
     except FileReadTimeoutError as e:
         raise FileReadTimeoutError(
             f"Timed out reading {file_path} after {timeout}s "
@@ -124,11 +106,6 @@ def safe_read_text(
         raise FileReadError(f"Permission denied: {file_path}") from e
     except OSError as e:
         raise FileReadError(f"Cannot read {file_path}: {e}") from e
-    finally:
-        alarm(0)
-        signal.signal(sigalrm, old_handler)
-
-    return content
 
 
 def safe_read_bytes(
@@ -154,21 +131,9 @@ def safe_read_bytes(
         msg = f"File not found: {file_path}"
         raise FileNotFoundError(msg)
 
-    if not _signal_timeout_available():
-        try:
-            return file_path.read_bytes()
-        except Exception as e:
-            _handle_read_error(file_path, e)
-            raise
-
-    sigalrm, alarm = _get_signal_timeout_hooks()
-    old_handler = signal.getsignal(sigalrm)
-    content: bytes | None = None
     try:
-        signal.signal(sigalrm, _timeout_handler)
-        alarm(timeout)
-        content = file_path.read_bytes()
-        alarm(0)
+        with _read_timeout(timeout):
+            return file_path.read_bytes()
     except FileReadTimeoutError as e:
         raise FileReadTimeoutError(
             f"Timed out reading {file_path} after {timeout}s "
@@ -180,11 +145,6 @@ def safe_read_bytes(
         raise FileReadError(f"Permission denied: {file_path}") from e
     except OSError as e:
         raise FileReadError(f"Cannot read {file_path}: {e}") from e
-    finally:
-        alarm(0)
-        signal.signal(sigalrm, old_handler)
-
-    return content
 
 
 class BaseParser(ABC):
