@@ -8,7 +8,9 @@ for different document formats (Markdown, Obsidian, etc.).
 import logging
 import signal
 from abc import ABC, abstractmethod
+from collections.abc import Callable
 from pathlib import Path
+from typing import Any, cast
 
 from librarian.types import ParsedDocument
 
@@ -29,6 +31,39 @@ class FileReadTimeoutError(FileReadError, TimeoutError):
 
 def _timeout_handler(signum: int, frame: object) -> None:
     raise FileReadTimeoutError("File read timed out")
+
+
+def _signal_timeout_available() -> bool:
+    return hasattr(signal, "SIGALRM") and hasattr(signal, "alarm")
+
+
+def _get_signal_timeout_hooks() -> tuple[Any, Callable[[int], object]]:
+    return vars(signal)["SIGALRM"], cast("Callable[[int], object]", vars(signal)["alarm"])
+
+
+def _read_text_with_fallback(
+    file_path: Path,
+    encoding: str,
+    fallback_encoding: str | None,
+) -> str:
+    try:
+        return file_path.read_text(encoding=encoding)
+    except UnicodeDecodeError:
+        if fallback_encoding:
+            return file_path.read_text(encoding=fallback_encoding)
+        raise
+
+
+def _handle_read_error(file_path: Path, error: Exception) -> None:
+    if isinstance(error, FileReadTimeoutError):
+        raise error
+    if isinstance(error, FileNotFoundError):
+        raise error
+    if isinstance(error, PermissionError):
+        raise FileReadError(f"Permission denied: {file_path}") from error
+    if isinstance(error, OSError):
+        raise FileReadError(f"Cannot read {file_path}: {error}") from error
+    raise error
 
 
 def safe_read_text(
@@ -61,21 +96,23 @@ def safe_read_text(
         msg = f"File not found: {file_path}"
         raise FileNotFoundError(msg)
 
-    old_handler = signal.getsignal(signal.SIGALRM)
+    if not _signal_timeout_available():
+        try:
+            return _read_text_with_fallback(file_path, encoding, fallback_encoding)
+        except Exception as e:
+            _handle_read_error(file_path, e)
+            raise
+
+    sigalrm, alarm = _get_signal_timeout_hooks()
+    old_handler = signal.getsignal(sigalrm)
     content: str | None = None
     try:
-        signal.signal(signal.SIGALRM, _timeout_handler)
-        signal.alarm(timeout)
+        signal.signal(sigalrm, _timeout_handler)
+        alarm(timeout)
 
-        try:
-            content = file_path.read_text(encoding=encoding)
-        except UnicodeDecodeError:
-            if fallback_encoding:
-                content = file_path.read_text(encoding=fallback_encoding)
-            else:
-                raise
+        content = _read_text_with_fallback(file_path, encoding, fallback_encoding)
 
-        signal.alarm(0)
+        alarm(0)
     except FileReadTimeoutError as e:
         raise FileReadTimeoutError(
             f"Timed out reading {file_path} after {timeout}s "
@@ -88,8 +125,8 @@ def safe_read_text(
     except OSError as e:
         raise FileReadError(f"Cannot read {file_path}: {e}") from e
     finally:
-        signal.alarm(0)
-        signal.signal(signal.SIGALRM, old_handler)
+        alarm(0)
+        signal.signal(sigalrm, old_handler)
 
     return content
 
@@ -117,13 +154,21 @@ def safe_read_bytes(
         msg = f"File not found: {file_path}"
         raise FileNotFoundError(msg)
 
-    old_handler = signal.getsignal(signal.SIGALRM)
+    if not _signal_timeout_available():
+        try:
+            return file_path.read_bytes()
+        except Exception as e:
+            _handle_read_error(file_path, e)
+            raise
+
+    sigalrm, alarm = _get_signal_timeout_hooks()
+    old_handler = signal.getsignal(sigalrm)
     content: bytes | None = None
     try:
-        signal.signal(signal.SIGALRM, _timeout_handler)
-        signal.alarm(timeout)
+        signal.signal(sigalrm, _timeout_handler)
+        alarm(timeout)
         content = file_path.read_bytes()
-        signal.alarm(0)
+        alarm(0)
     except FileReadTimeoutError as e:
         raise FileReadTimeoutError(
             f"Timed out reading {file_path} after {timeout}s "
@@ -136,8 +181,8 @@ def safe_read_bytes(
     except OSError as e:
         raise FileReadError(f"Cannot read {file_path}: {e}") from e
     finally:
-        signal.alarm(0)
-        signal.signal(signal.SIGALRM, old_handler)
+        alarm(0)
+        signal.signal(sigalrm, old_handler)
 
     return content
 
