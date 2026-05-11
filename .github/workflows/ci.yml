@@ -47,6 +47,9 @@ jobs:
           # Smoke-test on Windows to catch POSIX-only regressions (e.g. SIGALRM).
           - os: windows-latest
             python-version: "3.11"
+          # Smoke-test on macOS — primary developer platform, catches BSD/Darwin quirks.
+          - os: macos-latest
+            python-version: "3.11"
     steps:
       - uses: actions/checkout@v4
 
