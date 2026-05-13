@@ -29,6 +29,20 @@ class TestSafeReadText:
         content = safe_read_text(test_file)
         assert content == "hello world"
 
+    def test_read_existing_file_without_sigalrm(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Test reading text on platforms without POSIX SIGALRM."""
+        import signal
+
+        test_file = tmp_path / "test.md"
+        test_file.write_text("# Hello\nworld", encoding="utf-8")
+
+        monkeypatch.delattr(signal, "SIGALRM", raising=False)
+
+        content = safe_read_text(test_file)
+        assert content == "# Hello\nworld"
+
     def test_file_not_found(self, tmp_path: Path) -> None:
         """Test FileNotFoundError for missing files."""
         missing = tmp_path / "nonexistent.md"
@@ -95,6 +109,20 @@ class TestSafeReadBytes:
         """Test reading a normal binary file."""
         test_file = tmp_path / "test.bin"
         test_file.write_bytes(b"\x00\x01\x02")
+
+        content = safe_read_bytes(test_file)
+        assert content == b"\x00\x01\x02"
+
+    def test_read_existing_file_without_sigalrm(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Test reading bytes on platforms without POSIX SIGALRM."""
+        import signal
+
+        test_file = tmp_path / "test.bin"
+        test_file.write_bytes(b"\x00\x01\x02")
+
+        monkeypatch.delattr(signal, "SIGALRM", raising=False)
 
         content = safe_read_bytes(test_file)
         assert content == b"\x00\x01\x02"
