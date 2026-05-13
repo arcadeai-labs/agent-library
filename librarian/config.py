@@ -132,7 +132,7 @@ PDF_CHUNK_STRATEGY = ChunkingStrategy(PDF_CHUNK_STRATEGY_STR)
 # =============================================================================
 
 SEARCH_LIMIT = safe_int(os.getenv("SEARCH_LIMIT"), 10)
-MMR_LAMBDA = safe_float(os.getenv("MMR_LAMBDA"), 0.1)
+MMR_LAMBDA = safe_float(os.getenv("MMR_LAMBDA"), 0.7)
 HYBRID_ALPHA = safe_float(os.getenv("HYBRID_ALPHA"), 0.7)
 
 # Cross-modal search

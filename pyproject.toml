@@ -1,9 +1,9 @@
 [project]
 name = "agent-library"
-version = "0.12.0"
+version = "0.13.0"
 description = "Multi-modal knowledge library with vector and full-text search for text, code, images, and PDFs"
 readme = "README.md"
-license = "MIT"
+license = "Apache-2.0"
 requires-python = ">=3.10"
 authors = [
     { name = "Arcade.dev", email = "dev@arcade.dev" }
@@ -13,7 +13,7 @@ classifiers = [
     "Development Status :: 4 - Beta",
     "Environment :: Console",
     "Intended Audience :: Developers",
-    "License :: OSI Approved :: MIT License",
+    "License :: OSI Approved :: Apache Software License",
     "Operating System :: OS Independent",
     "Programming Language :: Python :: 3",
     "Programming Language :: Python :: 3.10",
@@ -23,7 +23,8 @@ classifiers = [
     "Topic :: Text Processing :: Indexing",
 ]
 dependencies = [
-    "arcade-mcp-server>=0.1.0",
+    "arcade-mcp-server>=1.21.0",
+    "arcade-tdk>=3.8.0",
     "sentence-transformers>=2.2.0",
     "sqlite-vec>=0.1.0",
     "pyyaml>=6.0",
@@ -71,7 +72,11 @@ all = [
     "agent-library[code,pdf,ocr,vision]",
 ]
 evals = [
-    "arcade-mcp[evals]>=1.10.0",
+    "arcade-mcp[evals]>=1.14.0",
+]
+docs = [
+    "mkdocs>=1.6.0",
+    "mkdocs-material>=9.5.0",
 ]
 
 [build-system]

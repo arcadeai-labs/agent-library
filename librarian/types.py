@@ -105,6 +105,20 @@ class SearchMode(str, Enum):
     KEYWORD = "keyword"
 
 
+class LibraryView(str, Enum):
+    """View selector for the unified get_library_overview tool.
+
+    - SECTIONS: top-level subdirectories of each source with doc counts
+      and sample titles. Best for "where do I add new content?"
+    - STATS: library totals + current configuration knobs.
+    - TREE: recursive filesystem structure of each source (uses depth).
+    """
+
+    SECTIONS = "sections"
+    STATS = "stats"
+    TREE = "tree"
+
+
 # Timeframe is canonically defined in librarian.utils.timeframe
 # Re-exported here for backward compatibility
 from librarian.utils.timeframe import Timeframe as Timeframe  # noqa: E402

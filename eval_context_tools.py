@@ -459,10 +459,10 @@ async def ingestion_eval() -> EvalSuite:
         rubric=EvalRubric(fail_threshold=0.7, warn_threshold=0.85),
     )
 
-    # This suite tests the optional GetLibraryStats + GetLibrarySources tools
-    # alongside the core IndexDirectoryToLibrary tool, so optional tools must
-    # be enabled here (unlike the other suites, which disable them to keep
-    # tool-selection unambiguous between direct actions and workflow helpers).
+    # This suite tests the optional GetLibraryOverview tool alongside the core
+    # IndexDirectoryToLibrary tool, so optional tools must be enabled here
+    # (the other suites disable them to keep tool-selection unambiguous
+    # between direct actions and workflow helpers).
     await suite.add_mcp_stdio_server(
         command=["uv", "run", "python", "-m", "librarian.server", "stdio"],
         env={"LIBRARIAN_ENABLE_OPTIONAL_TOOLS": "true"},
@@ -501,31 +501,115 @@ async def ingestion_eval() -> EvalSuite:
     )
 
     # ==========================================================================
-    # Stats (optional tools - enabled in evals)
+    # Library overview (consolidated stats / sections / tree)
     # ==========================================================================
 
     suite.add_case(
-        name="Get library statistics",
+        name="Get library statistics (view=stats)",
         user_message="How many documents do I have in my library?",
         expected_tool_calls=[
             ExpectedMCPToolCall(
-                "Librarian_GetLibraryStats",
-                {},
+                "Librarian_GetLibraryOverview",
+                {"view": "stats"},
             )
         ],
-        critics=[],  # No parameters to validate
+        critics=[
+            BinaryCritic(critic_field="view", weight=1.0),
+        ],
     )
 
     suite.add_case(
-        name="Get library sources",
-        user_message="What sources are in my library and how many documents from each?",
+        name="Show library tree (view=tree)",
+        user_message="Show me the folder layout of my library so I can see how it's organized",
         expected_tool_calls=[
             ExpectedMCPToolCall(
-                "Librarian_GetLibrarySources",
-                {},
+                "Librarian_GetLibraryOverview",
+                {"view": "tree"},
             )
         ],
-        critics=[],  # No parameters to validate
+        critics=[
+            BinaryCritic(critic_field="view", weight=1.0),
+        ],
+    )
+
+    return suite
+
+
+@tool_eval()
+async def location_workflow_eval() -> EvalSuite:
+    """Evaluate the 'where should I put this?' workflow helpers.
+
+    GetLibraryOverview (default view='sections') is the canonical pre-flight
+    call before AddToLibrary, and SuggestLibraryLocation is the smart-default
+    for content the user hasn't filed by hand. These cases verify the model
+    picks each one in the right context.
+    """
+    suite = EvalSuite(
+        name="Library Location Workflow",
+        system_message=(
+            "You are a helpful assistant with access to a personal knowledge library. "
+            "Before storing new content, figure out where it belongs. "
+            "Use GetLibraryOverview to enumerate writable locations, "
+            "or SuggestLibraryLocation to get ranked recommendations based on "
+            "title and content."
+        ),
+        rubric=EvalRubric(fail_threshold=0.7, warn_threshold=0.85),
+    )
+
+    await suite.add_mcp_stdio_server(
+        command=["uv", "run", "python", "-m", "librarian.server", "stdio"],
+        env={"LIBRARIAN_ENABLE_OPTIONAL_TOOLS": "true"},
+    )
+
+    suite.add_case(
+        name="Enumerate available sections",
+        user_message="Where can I save things in my library? Show me the sections.",
+        expected_tool_calls=[
+            # Default view is 'sections', so passing nothing — or view='sections' —
+            # are both correct.
+            ExpectedMCPToolCall("Librarian_GetLibraryOverview", {}),
+        ],
+        critics=[],  # Tool selection alone carries the signal.
+    )
+
+    suite.add_case(
+        name="Ask for placement recommendation",
+        user_message=(
+            "I've got some notes on rate limiting strategies — "
+            "where should I file this in my library?"
+        ),
+        expected_tool_calls=[
+            ExpectedMCPToolCall(
+                "Librarian_SuggestLibraryLocation",
+                {"title": "rate limiting strategies"},
+            )
+        ],
+        critics=[
+            SimilarityCritic(critic_field="title", weight=1.0),
+        ],
+    )
+
+    suite.add_case(
+        name="Suggestion with content summary",
+        user_message=(
+            "Help me find the best place to put a doc titled 'Q2 OKRs' "
+            "about engineering team objectives for next quarter"
+        ),
+        expected_tool_calls=[
+            ExpectedMCPToolCall(
+                "Librarian_SuggestLibraryLocation",
+                {
+                    "title": "Q2 OKRs",
+                    "content_summary": "engineering team objectives for next quarter",
+                },
+            )
+        ],
+        critics=[
+            SimilarityCritic(critic_field="title", weight=0.5),
+            SimilarityCritic(
+                critic_field="content_summary", weight=0.5, similarity_threshold=0.5
+            ),
+        ],
     )
 
     return suite
@@ -739,17 +823,20 @@ async def adversarial_eval() -> EvalSuite:
         critics=[],  # Tool-selection correctness is enforced by the rubric.
     )
 
+    # Realistic phrasing of "do I have notes on X?" — the answer comes from
+    # search, not from list/read. This replaces an earlier "Is /tmp/foo.md in
+    # my library?" case that didn't match how users actually ask.
     suite.add_case(
-        name="Binary presence check via read",
-        user_message="Is /tmp/notes.md in my library?",
+        name="Existential search query",
+        user_message="Do I have any notes on Kubernetes networking?",
         expected_tool_calls=[
             ExpectedMCPToolCall(
-                "Librarian_ReadFromLibrary",
-                {"path": "/tmp/notes.md"},
+                "Librarian_SearchLibrary",
+                {"query": "Kubernetes networking"},
             )
         ],
         critics=[
-            BinaryCritic(critic_field="path", weight=1.0),
+            SimilarityCritic(critic_field="query", weight=1.0),
         ],
     )
 
@@ -889,9 +976,29 @@ async def adversarial_eval() -> EvalSuite:
         ],
     )
 
+    # Prior context establishes the user just indexed image-format diagrams,
+    # so "diagrams" should now resolve to asset_type=image rather than text.
+    # This is a realistic agent scenario — the tool catalog plus conversation
+    # history together carry the signal.
     suite.add_case(
-        name="Infer asset_type=image from 'diagrams'",
-        user_message="Any diagrams explaining the auth flow?",
+        name="Infer asset_type=image from 'diagrams' (with context)",
+        user_message="Pull up the diagrams about the auth flow",
+        additional_messages=[
+            {
+                "role": "user",
+                "content": (
+                    "I just indexed our architecture folder — it's mostly PNG "
+                    "diagrams alongside the docs."
+                ),
+            },
+            {
+                "role": "assistant",
+                "content": (
+                    "Got it — your library now includes the architecture "
+                    "diagrams alongside the existing documentation."
+                ),
+            },
+        ],
         expected_tool_calls=[
             ExpectedMCPToolCall(
                 "Librarian_SearchLibrary",
@@ -1051,20 +1158,137 @@ async def adversarial_eval() -> EvalSuite:
     )
 
     # ==========================================================================
-    # Block F — Adversarial phrasings that tempt the wrong tool
+    # Block F — Multi-turn / context-aware reasoning (additional_messages)
     # ==========================================================================
+    #
+    # These cases exercise the agent's ability to integrate prior conversation
+    # turns. The user's final message is intentionally terse; the model must
+    # lift the missing arguments from earlier context. Inlining short threads
+    # keeps the cases readable; longer threads can be moved to JSON fixtures
+    # under `evals/threads/` and loaded via `json.load`.
 
     suite.add_case(
-        name="Add with minimal content cue",
-        user_message="Add 'foobar' to my library",
+        name="Multi-turn add: content lifted from prior turn",
+        user_message="Yeah just save it as a quick placeholder note — nothing fancy",
+        additional_messages=[
+            # 'titled' makes the prior message unambiguous — without it the
+            # model can plausibly read 'foobar' as the content and invent a
+            # title, which we'd rather not penalize.
+            {"role": "user", "content": "Add a note titled 'foobar' to my library"},
+            {
+                "role": "assistant",
+                "content": "Sure, what content should the note hold?",
+            },
+        ],
         expected_tool_calls=[
             ExpectedMCPToolCall(
                 "Librarian_AddToLibrary",
-                {"title": "foobar"},
+                # title comes from turn 1, content comes from final turn.
+                {"title": "foobar", "content": "placeholder note"},
             )
         ],
         critics=[
-            BinaryCritic(critic_field="title", weight=1.0),
+            BinaryCritic(critic_field="title", weight=0.6),
+            SimilarityCritic(
+                critic_field="content", weight=0.4, similarity_threshold=0.3
+            ),
+        ],
+    )
+
+    suite.add_case(
+        name="Multi-turn add: directory lifted from prior overview",
+        user_message=(
+            "Save my deploy notes to the work section: '# Deploy Plan\\n\\nStage 1: canary'"
+        ),
+        additional_messages=[
+            {"role": "user", "content": "Where can I save things in my library?"},
+            {
+                "role": "assistant",
+                "content": (
+                    "You have these top-level sections: "
+                    "/Users/me/notes/work, /Users/me/notes/personal, "
+                    "/Users/me/notes/research."
+                ),
+            },
+        ],
+        expected_tool_calls=[
+            ExpectedMCPToolCall(
+                "Librarian_AddToLibrary",
+                {
+                    "title": "deploy notes",
+                    "content": "# Deploy Plan\n\nStage 1: canary",
+                    "directory": "/Users/me/notes/work",
+                },
+            )
+        ],
+        critics=[
+            SimilarityCritic(critic_field="title", weight=0.25),
+            SimilarityCritic(critic_field="content", weight=0.25),
+            BinaryCritic(critic_field="directory", weight=0.5),
+        ],
+    )
+
+    suite.add_case(
+        name="Multi-turn search: keyword fallback after empty hybrid",
+        user_message="Try a keyword search instead — the exact phrase is 'CRDT consistency'",
+        additional_messages=[
+            {
+                "role": "user",
+                "content": "Find docs about CRDT consistency in my library",
+            },
+            {
+                "role": "assistant",
+                "content": (
+                    "I searched but didn't find anything matching that. "
+                    "Want me to try a different mode?"
+                ),
+            },
+        ],
+        expected_tool_calls=[
+            ExpectedMCPToolCall(
+                "Librarian_SearchLibrary",
+                {"query": "CRDT consistency", "mode": "keyword"},
+            )
+        ],
+        critics=[
+            SimilarityCritic(critic_field="query", weight=0.4),
+            BinaryCritic(critic_field="mode", weight=0.6),
+        ],
+    )
+
+    suite.add_case(
+        name="Multi-turn update: path lifted from prior search result",
+        user_message=(
+            # 'Replace the contents of that doc' makes intent UNAMBIGUOUSLY an
+            # update, not an add. The earlier draft used 'Add a note about ...'
+            # which the model reasonably routed to AddToLibrary.
+            "Replace the contents of that doc with: "
+            "'Token rotation policy: 30 day expiry'"
+        ),
+        additional_messages=[
+            {"role": "user", "content": "Find docs about JWT in my library"},
+            {
+                "role": "assistant",
+                "content": (
+                    "I found 1 doc: /Users/me/notes/work/JWT_Best_Practices.md "
+                    "(score 0.94)."
+                ),
+            },
+        ],
+        expected_tool_calls=[
+            ExpectedMCPToolCall(
+                "Librarian_UpdateLibraryDoc",
+                {
+                    "path": "/Users/me/notes/work/JWT_Best_Practices.md",
+                    "content": "Token rotation policy: 30 day expiry",
+                },
+            )
+        ],
+        critics=[
+            BinaryCritic(critic_field="path", weight=0.6),
+            SimilarityCritic(
+                critic_field="content", weight=0.4, similarity_threshold=0.5
+            ),
         ],
     )
 

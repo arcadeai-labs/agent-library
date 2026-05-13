@@ -662,8 +662,13 @@ def add_source(
                 rprint(f"  [red]Error:[/red] {err.get('path', '')}: {err.get('error', '')}")
 
         skipped = result.get("skipped", 0)
+        status_line = (
+            "[red]Source added, but indexing had errors.[/red]"
+            if errors
+            else "[green]Source added and indexed![/green]"
+        )
         summary = (
-            f"[green]Source added and indexed![/green]\n\n"
+            f"{status_line}\n\n"
             f"Name: [cyan]{source['name']}[/cyan]\n"
             f"Path: [blue]{source_path}[/blue]\n"
             f"Files found: [yellow]{len(files_to_index)}[/yellow]\n"
@@ -675,6 +680,8 @@ def add_source(
             summary += f"\nErrors: [red]{len(errors)}[/red]"
 
         rprint(Panel(summary, title="Source Added"))
+        if errors:
+            raise typer.Exit(1)
 
 
 # =============================================================================

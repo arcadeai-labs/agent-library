@@ -1,0 +1,94 @@
+site_name: Agent Library
+site_description: A personal knowledge library for AI agents — store and search notes, code, PDFs, and images.
+site_url: https://arcadeai.github.io/agent-library/
+repo_url: https://github.com/ArcadeAI/agent-library
+repo_name: ArcadeAI/agent-library
+edit_uri: edit/main/docs/
+
+docs_dir: docs
+
+theme:
+  name: material
+  # Identity is "Agent Library" (the site_name) rendered as the header text;
+  # the brand vibe comes from the cyan accent + dark theme defined below and
+  # in docs/assets/extra.css, not from a borrowed wordmark.
+  icon:
+    logo: material/bookshelf
+    repo: fontawesome/brands/github
+  features:
+    - navigation.instant
+    - navigation.tracking
+    - navigation.sections
+    - navigation.top
+    - search.suggest
+    - search.highlight
+    - content.code.copy
+    - content.action.edit
+    - toc.follow
+  # Brand-aligned palette: dark is the primary experience (matches arcade.dev),
+  # light is offered as an alternate. The actual hex values come from the
+  # custom CSS in docs/assets/extra.css — these palette entries just pin the
+  # right Material scheme + a brand-adjacent base color.
+  palette:
+    - media: "(prefers-color-scheme: dark)"
+      scheme: slate
+      primary: black
+      accent: cyan
+      toggle:
+        icon: material/weather-sunny
+        name: Switch to light mode
+    - media: "(prefers-color-scheme: light)"
+      scheme: default
+      primary: black
+      accent: cyan
+      toggle:
+        icon: material/weather-night
+        name: Switch to dark mode
+  font:
+    text: Inter
+    code: JetBrains Mono
+
+extra_css:
+  - assets/extra.css
+
+markdown_extensions:
+  - admonition
+  - attr_list
+  - def_list
+  - footnotes
+  - md_in_html
+  - tables
+  - toc:
+      permalink: true
+  - pymdownx.details
+  - pymdownx.highlight:
+      anchor_linenums: true
+      line_spans: __span
+      pygments_lang_class: true
+  - pymdownx.inlinehilite
+  - pymdownx.snippets
+  - pymdownx.superfences
+  - pymdownx.tabbed:
+      alternate_style: true
+  - pymdownx.tasklist:
+      custom_checkbox: true
+  - pymdownx.keys
+
+nav:
+  - Home: index.md
+  - Quickstart: quickstart.md
+  - Install:
+      - Installing uv: install.md
+  - Use it with your AI:
+      - Claude Desktop: integrations/claude-desktop.md
+      - Claude Code (CLI): integrations/claude-code.md
+      - Cursor: integrations/cursor.md
+  - CLI reference: cli.md
+  - Configuration: configuration.md
+  - Concepts: concepts.md
+  - Troubleshooting: troubleshooting.md
+
+extra:
+  social:
+    - icon: fontawesome/brands/github
+      link: https://github.com/ArcadeAI/agent-library

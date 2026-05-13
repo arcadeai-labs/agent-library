@@ -37,25 +37,35 @@ jobs:
 
   test:
     name: Tests
-    runs-on: ubuntu-latest
+    runs-on: ${{ matrix.os }}
     strategy:
+      fail-fast: false
       matrix:
+        os: [ubuntu-latest]
         python-version: ["3.10", "3.11", "3.12"]
+        include:
+          # Smoke-test on Windows to catch POSIX-only regressions (e.g. SIGALRM).
+          - os: windows-latest
+            python-version: "3.11"
+          # Smoke-test on macOS — primary developer platform, catches BSD/Darwin quirks.
+          - os: macos-latest
+            python-version: "3.11"
     steps:
       - uses: actions/checkout@v4
 
-      - name: Install uv
+      - name: Install uv and Python ${{ matrix.python-version }}
         uses: astral-sh/setup-uv@v7
         with:
           version: "latest"
-
-      - name: Set up Python ${{ matrix.python-version }}
-        uses: actions/setup-python@v5
-        with:
           python-version: ${{ matrix.python-version }}
 
       - name: Install dependencies
-        run: uv sync --extra dev
+        # Force uv-managed (python-build-standalone) Python. The runner's
+        # pre-installed Python on macOS is compiled without
+        # --enable-loadable-sqlite-extensions, so sqlite-vec fails to load.
+        # python-build-standalone enables loadable sqlite extensions on
+        # every platform.
+        run: uv sync --extra dev --python-preference=only-managed
 
       - name: Run tests
         run: uv run pytest -v --cov --cov-config=pyproject.toml --cov-report=xml
@@ -64,8 +74,8 @@ jobs:
           EMBEDDING_DIMENSION: "384"
 
       - name: Upload coverage to Codecov
-        uses: codecov/codecov-action@v6
-        if: matrix.python-version == '3.11'
+        uses: codecov/codecov-action@v4
+        if: matrix.os == 'ubuntu-latest' && matrix.python-version == '3.11'
         with:
           files: ./coverage.xml
           fail_ci_if_error: false
