@@ -12,7 +12,7 @@ import struct
 import threading
 from collections.abc import Generator
 from contextlib import contextmanager
-from datetime import datetime
+from datetime import date, datetime
 from typing import Any
 
 import sqlite_vec
@@ -28,6 +28,19 @@ from librarian.storage.migrations import run_migrations
 from librarian.types import AssetType, Chunk, Document, EmbeddingModality
 
 logger = logging.getLogger(__name__)
+
+
+def _json_default(value: Any) -> str:
+    """JSON fallback for types YAML frontmatter emits but stdlib json can't encode.
+
+    Obsidian and other markdown frontmatter commonly contain `YYYY-MM-DD` values
+    which PyYAML parses into `datetime.date`. Stored as ISO strings; round-tripped
+    values come back as strings (acceptable because metadata is informational,
+    not queried as dates).
+    """
+    if isinstance(value, (date, datetime)):
+        return value.isoformat()
+    return str(value)
 
 
 def get_effective_embedding_dimension() -> int:
@@ -286,7 +299,9 @@ class Database:
                     document.path,
                     document.title,
                     document.content,
-                    json.dumps(document.metadata) if document.metadata else None,
+                    json.dumps(document.metadata, default=_json_default)
+                    if document.metadata
+                    else None,
                     document.file_mtime,
                     document.asset_type.value,
                 ),
@@ -312,7 +327,9 @@ class Database:
                     document.path,
                     document.title,
                     document.content,
-                    json.dumps(document.metadata) if document.metadata else None,
+                    json.dumps(document.metadata, default=_json_default)
+                    if document.metadata
+                    else None,
                     document.file_mtime,
                     document.asset_type.value,
                     document.id,
