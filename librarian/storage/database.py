@@ -38,7 +38,7 @@ def _json_default(value: Any) -> str:
     values come back as strings (acceptable because metadata is informational,
     not queried as dates).
     """
-    if isinstance(value, (date, datetime)):
+    if isinstance(value, date | datetime):
         return value.isoformat()
     return str(value)
 
