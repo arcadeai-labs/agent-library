@@ -446,7 +446,7 @@ def list_sources(
 
     table = Table(title="Document Sources", show_header=True, header_style="bold cyan")
     table.add_column("Name", style="green")
-    table.add_column("Path", style="blue")
+    table.add_column("Path", style="blue", overflow="fold")
     table.add_column("Type", style="magenta")
     table.add_column("Status", style="yellow")
 
@@ -1029,7 +1029,7 @@ def docs_overview(ctx: typer.Context) -> None:
 
     table = Table(title="Sources", show_header=True, header_style="bold cyan")
     table.add_column("Name", style="green")
-    table.add_column("Path", style="blue")
+    table.add_column("Path", style="blue", overflow="fold")
     table.add_column("Docs", justify="right", style="yellow")
     table.add_column("Status")
 
@@ -1102,7 +1102,7 @@ def docs_list(
     )
     table.add_column("ID", style="dim", width=4)
     table.add_column("Title", style="green", max_width=38)
-    table.add_column("Path", style="blue", max_width=46)
+    table.add_column("Path", style="blue", max_width=46, overflow="fold")
     table.add_column("Type", style="magenta", width=6)
 
     home = str(Path.home())
@@ -1161,7 +1161,7 @@ def docs_search(
     )
     table.add_column("ID", style="dim", width=4)
     table.add_column("Title", style="green")
-    table.add_column("Path", style="blue", max_width=50)
+    table.add_column("Path", style="blue", max_width=50, overflow="fold")
 
     home = str(Path.home())
     for doc in matches[:limit]:
@@ -1331,7 +1331,7 @@ def search_cmd(
     table = Table(show_header=True, header_style="bold cyan", box=None)
     table.add_column("#", style="dim", width=3)
     table.add_column("Score", justify="right", width=7)
-    table.add_column("Path", style="blue")
+    table.add_column("Path", style="blue", overflow="fold")
 
     for i, result in enumerate(results, 1):
         score = result.get("score", 0)
