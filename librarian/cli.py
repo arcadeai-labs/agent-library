@@ -1628,7 +1628,13 @@ def serve(
 @app.command("version", hidden=True)
 def version() -> None:
     """Show version."""
-    rprint("Librarian v0.5.0")
+    from importlib.metadata import PackageNotFoundError, version as _pkg_version
+
+    try:
+        pkg_version = _pkg_version("agent-library")
+    except PackageNotFoundError:
+        pkg_version = "unknown"
+    rprint(f"Librarian v{pkg_version}")
 
 
 if __name__ == "__main__":
