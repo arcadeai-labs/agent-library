@@ -47,6 +47,7 @@ from librarian.indexing import get_indexing_service
 from librarian.processing.embed import get_embedder
 from librarian.processing.parsers.base import FileReadError, FileReadTimeoutError
 from librarian.retrieval.search import HybridSearcher
+from librarian.sources.ignore import GitignoreMatcher, should_skip_file
 from librarian.storage.database import get_database
 from librarian.tool_outputs import (
     AddOutput,
@@ -96,99 +97,13 @@ def _process_and_index_file(file_path: Path) -> dict[str, Any]:
     return get_indexing_service().index_file(file_path)
 
 
-def _should_skip_file(file_path: Path, supported_extensions: set[str]) -> bool:
-    """
-    Check if a file should be skipped during indexing.
-
-    Args:
-        file_path: Path to the file.
-        supported_extensions: Set of supported extensions.
-
-    Returns:
-        True if the file should be skipped.
-    """
-    # Skip system/hidden directories
-    skip_dirs = {
-        "__pycache__",
-        ".git",
-        ".svn",
-        ".hg",
-        "node_modules",
-        ".venv",
-        "venv",
-        ".pytest_cache",
-        ".mypy_cache",
-        ".ruff_cache",
-        "__MACOSX",
-        ".DS_Store",
-    }
-
-    # Check if file is in a skipped directory
-    for parent in file_path.parents:
-        if parent.name in skip_dirs:
-            return True
-
-    # Skip hidden files (starting with .)
-    if file_path.name.startswith("."):
-        return True
-
-    # Skip binary/system file extensions
-    skip_extensions = {
-        # Executables and binaries
-        ".exe",
-        ".bin",
-        ".dll",
-        ".so",
-        ".dylib",
-        ".a",
-        ".o",
-        # Disk images and archives
-        ".dmg",
-        ".iso",
-        ".img",
-        ".app",
-        ".pkg",
-        # Compressed archives
-        ".zip",
-        ".tar",
-        ".gz",
-        ".bz2",
-        ".xz",
-        ".7z",
-        ".rar",
-        # Python compiled
-        ".pyc",
-        ".pyo",
-        ".pyd",
-        # System files
-        ".lock",
-        ".log",
-        ".tmp",
-        ".temp",
-        ".cache",
-        # Media files (large binaries)
-        ".mp4",
-        ".mp3",
-        ".wav",
-        ".avi",
-        ".mov",
-        ".flac",
-        # Font files
-        ".ttf",
-        ".otf",
-        ".woff",
-        ".woff2",
-    }
-
-    if file_path.suffix.lower() in skip_extensions:
-        return True
-
-    # Skip files without extensions
-    if not file_path.suffix:
-        return True
-
-    # Skip if extension not in supported list
-    return file_path.suffix.lower() not in supported_extensions
+def _should_skip_file(
+    file_path: Path,
+    supported_extensions: set[str],
+    gitignore_matcher: GitignoreMatcher | None = None,
+) -> bool:
+    """Check if a file should be skipped during indexing."""
+    return should_skip_file(file_path, supported_extensions, gitignore_matcher)
 
 
 def _resolve_path(raw_path: str, kind: str = "path") -> Path:
@@ -243,6 +158,10 @@ def _resolve_path(raw_path: str, kind: str = "path") -> Path:
 async def index_directory_to_library(
     context: Context,
     directory: Annotated[str, "Absolute path to directory containing files to add to the library"],
+    include_ignored: Annotated[
+        bool,
+        "If True, index files even when matched by a .gitignore under the directory.",
+    ] = False,
 ) -> Annotated[
     IndexDirectoryOutput,
     "Per-directory index summary with counts and a per-file status list.",
@@ -285,12 +204,16 @@ async def index_directory_to_library(
     registry = get_registry()
     supported_extensions = registry.get_supported_extensions()
 
+    gitignore_matcher = None if include_ignored else GitignoreMatcher(dir_path)
+
     all_files: list[Path] = []
     for ext in supported_extensions:
         pattern = f"**/*{ext}"
         all_files.extend(dir_path.glob(pattern))
 
-    all_files = [f for f in all_files if not _should_skip_file(f, supported_extensions)]
+    all_files = [
+        f for f in all_files if not _should_skip_file(f, supported_extensions, gitignore_matcher)
+    ]
 
     if not all_files:
         return IndexDirectoryOutput(
