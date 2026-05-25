@@ -47,7 +47,12 @@ from librarian.indexing import get_indexing_service
 from librarian.processing.embed import get_embedder
 from librarian.processing.parsers.base import FileReadError, FileReadTimeoutError
 from librarian.retrieval.search import HybridSearcher
-from librarian.sources.ignore import GitignoreMatcher, should_skip_file
+from librarian.sources.ignore import (
+    GitignoreMatcher,
+    LibrarianTrackMatcher,
+    normalize_force_include,
+    should_skip_file,
+)
 from librarian.storage.database import get_database
 from librarian.tool_outputs import (
     AddOutput,
@@ -101,9 +106,17 @@ def _should_skip_file(
     file_path: Path,
     supported_extensions: set[str],
     gitignore_matcher: GitignoreMatcher | None = None,
+    force_include: frozenset[Path] | None = None,
+    track_matcher: LibrarianTrackMatcher | None = None,
 ) -> bool:
     """Check if a file should be skipped during indexing."""
-    return should_skip_file(file_path, supported_extensions, gitignore_matcher)
+    return should_skip_file(
+        file_path,
+        supported_extensions,
+        gitignore_matcher,
+        force_include=force_include,
+        track_matcher=track_matcher,
+    )
 
 
 def _resolve_path(raw_path: str, kind: str = "path") -> Path:
@@ -162,6 +175,15 @@ async def index_directory_to_library(
         bool,
         "If True, index files even when matched by a .gitignore under the directory.",
     ] = False,
+    force_include: Annotated[
+        list[str] | None,
+        (
+            "Files or directories to always index, even when matched by a .gitignore "
+            "or by the skip-dirs baseline (node_modules, __pycache__, etc.). "
+            "Pointing at a directory force-includes everything underneath. "
+            "Has no effect on unsupported or binary file types."
+        ),
+    ] = None,
 ) -> Annotated[
     IndexDirectoryOutput,
     "Per-directory index summary with counts and a per-file status list.",
@@ -205,6 +227,8 @@ async def index_directory_to_library(
     supported_extensions = registry.get_supported_extensions()
 
     gitignore_matcher = None if include_ignored else GitignoreMatcher(dir_path)
+    track_matcher = LibrarianTrackMatcher(dir_path)
+    forced_paths = normalize_force_include(force_include)
 
     all_files: list[Path] = []
     for ext in supported_extensions:
@@ -212,7 +236,15 @@ async def index_directory_to_library(
         all_files.extend(dir_path.glob(pattern))
 
     all_files = [
-        f for f in all_files if not _should_skip_file(f, supported_extensions, gitignore_matcher)
+        f
+        for f in all_files
+        if not _should_skip_file(
+            f,
+            supported_extensions,
+            gitignore_matcher,
+            force_include=forced_paths,
+            track_matcher=track_matcher,
+        )
     ]
 
     if not all_files:

@@ -7,6 +7,8 @@ from pathlib import Path
 from librarian.sources.ignore import (
     ALWAYS_SKIP_DIRS,
     GitignoreMatcher,
+    LibrarianTrackMatcher,
+    normalize_force_include,
     should_skip_file,
 )
 
@@ -107,3 +109,105 @@ class TestShouldSkipFile:
         _write(tmp_path / ".gitignore", "drafts/\n")
         f = _write(tmp_path / "drafts" / "wip.md", "x")
         assert not should_skip_file(f, SUPPORTED, gitignore_matcher=None)
+
+
+class TestForceInclude:
+    def test_force_include_directory_overrides_gitignore(self, tmp_path: Path) -> None:
+        _write(tmp_path / ".gitignore", "drafts/\n")
+        f = _write(tmp_path / "drafts" / "wip.md", "x")
+        matcher = GitignoreMatcher(tmp_path)
+        forced = normalize_force_include([str(tmp_path / "drafts")])
+
+        assert should_skip_file(f, SUPPORTED, gitignore_matcher=matcher)
+        assert not should_skip_file(f, SUPPORTED, gitignore_matcher=matcher, force_include=forced)
+
+    def test_force_include_file_overrides_gitignore(self, tmp_path: Path) -> None:
+        _write(tmp_path / ".gitignore", "*.md\n")
+        f = _write(tmp_path / "keep.md", "x")
+        matcher = GitignoreMatcher(tmp_path)
+        forced = normalize_force_include([str(f)])
+
+        assert should_skip_file(f, SUPPORTED, gitignore_matcher=matcher)
+        assert not should_skip_file(f, SUPPORTED, gitignore_matcher=matcher, force_include=forced)
+
+    def test_force_include_overrides_always_skip_dirs(self, tmp_path: Path) -> None:
+        f = _write(tmp_path / "proj" / "node_modules" / "pkg" / "lib.py", "x")
+        forced = normalize_force_include([str(tmp_path / "proj" / "node_modules" / "pkg")])
+
+        assert should_skip_file(f, SUPPORTED, gitignore_matcher=None)
+        assert not should_skip_file(f, SUPPORTED, gitignore_matcher=None, force_include=forced)
+
+    def test_force_include_does_not_rescue_unsupported_extension(self, tmp_path: Path) -> None:
+        """Force-include bypasses skip rules, but unparseable file types still
+        cannot enter the index — the parser registry has no parser for them."""
+        f = _write(tmp_path / "binary.exe", "x")
+        forced = normalize_force_include([str(tmp_path)])
+        assert should_skip_file(f, SUPPORTED, gitignore_matcher=None, force_include=forced)
+
+    def test_force_include_does_not_rescue_hidden_files(self, tmp_path: Path) -> None:
+        f = _write(tmp_path / ".hidden.md", "x")
+        forced = normalize_force_include([str(tmp_path)])
+        assert should_skip_file(f, SUPPORTED, gitignore_matcher=None, force_include=forced)
+
+    def test_normalize_drops_nonexistent_paths(self, tmp_path: Path) -> None:
+        present = _write(tmp_path / "exists.md", "x")
+        forced = normalize_force_include([
+            str(present),
+            str(tmp_path / "does_not_exist"),
+        ])
+        assert present.resolve() in forced
+        assert len(forced) == 1
+
+    def test_normalize_handles_none_and_empty(self) -> None:
+        assert normalize_force_include(None) == frozenset()
+        assert normalize_force_include([]) == frozenset()
+
+
+class TestLibrarianTrackMatcher:
+    def test_no_trackfile_means_nothing_is_tracked(self, tmp_path: Path) -> None:
+        f = _write(tmp_path / "a.md", "x")
+        matcher = LibrarianTrackMatcher(tmp_path)
+        assert not matcher.is_tracked(f)
+
+    def test_root_trackfile_unignores_listed_files(self, tmp_path: Path) -> None:
+        _write(tmp_path / ".librariantrack", "drafts/\n")
+        kept = _write(tmp_path / "drafts" / "wip.md", "x")
+        other = _write(tmp_path / "other.md", "x")
+        matcher = LibrarianTrackMatcher(tmp_path)
+        assert matcher.is_tracked(kept)
+        assert not matcher.is_tracked(other)
+
+    def test_track_overrides_gitignore_for_matched_files(self, tmp_path: Path) -> None:
+        _write(tmp_path / ".gitignore", "drafts/\n")
+        _write(tmp_path / ".librariantrack", "drafts/\n")
+        f = _write(tmp_path / "drafts" / "wip.md", "x")
+
+        gitignore = GitignoreMatcher(tmp_path)
+        track = LibrarianTrackMatcher(tmp_path)
+
+        assert should_skip_file(f, SUPPORTED, gitignore_matcher=gitignore)
+        assert not should_skip_file(f, SUPPORTED, gitignore_matcher=gitignore, track_matcher=track)
+
+    def test_track_overrides_always_skip_dirs(self, tmp_path: Path) -> None:
+        _write(tmp_path / ".librariantrack", "node_modules/pkg/\n")
+        f = _write(tmp_path / "node_modules" / "pkg" / "lib.py", "x")
+        track = LibrarianTrackMatcher(tmp_path)
+
+        assert should_skip_file(f, SUPPORTED, gitignore_matcher=None)
+        assert not should_skip_file(f, SUPPORTED, gitignore_matcher=None, track_matcher=track)
+
+    def test_nested_trackfile_is_scoped_to_its_directory(self, tmp_path: Path) -> None:
+        _write(tmp_path / ".gitignore", "*.md\n")
+        _write(tmp_path / "kept" / ".librariantrack", "*.md\n")
+        kept = _write(tmp_path / "kept" / "doc.md", "x")
+        elsewhere = _write(tmp_path / "other" / "doc.md", "x")
+
+        gitignore = GitignoreMatcher(tmp_path)
+        track = LibrarianTrackMatcher(tmp_path)
+
+        assert not should_skip_file(
+            kept, SUPPORTED, gitignore_matcher=gitignore, track_matcher=track
+        )
+        assert should_skip_file(
+            elsewhere, SUPPORTED, gitignore_matcher=gitignore, track_matcher=track
+        )

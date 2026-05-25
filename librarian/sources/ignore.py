@@ -1,4 +1,14 @@
-"""File/directory skip logic for indexing, including .gitignore support."""
+"""File/directory skip logic for indexing.
+
+Three layers, in order of precedence (highest wins):
+1. Force-include set (--force-include) and `.librariantrack` patterns — make a
+   file survive every skip rule below, including the skip-dirs baseline and any
+   `.gitignore` match.
+2. `.gitignore` aggregation under the source root (`GitignoreMatcher`).
+3. Hardcoded but config-overridable defaults: directory names from
+   `INDEX_SKIP_DIRS`, binary/archive extensions from `INDEX_SKIP_EXTENSIONS`,
+   hidden files, and unsupported extensions.
+"""
 
 from __future__ import annotations
 
@@ -6,72 +16,17 @@ from pathlib import Path
 
 from pathspec import GitIgnoreSpec
 
-# Directories that are always skipped, even when --include-ignored is set.
-# These are caches, VCS metadata, and OS junk that should never enter the library.
-ALWAYS_SKIP_DIRS: frozenset[str] = frozenset({
-    "__pycache__",
-    ".git",
-    ".svn",
-    ".hg",
-    "node_modules",
-    ".venv",
-    "venv",
-    ".pytest_cache",
-    ".mypy_cache",
-    ".ruff_cache",
-    "__MACOSX",
-    ".DS_Store",
-})
+from librarian.config import INDEX_SKIP_DIRS, INDEX_SKIP_EXTENSIONS
 
-# Binary / system file extensions we never index.
-SKIP_EXTENSIONS: frozenset[str] = frozenset({
-    # Executables and binaries
-    ".exe",
-    ".bin",
-    ".dll",
-    ".so",
-    ".dylib",
-    ".a",
-    ".o",
-    # Disk images and archives
-    ".dmg",
-    ".iso",
-    ".img",
-    ".app",
-    ".pkg",
-    # Compressed archives
-    ".zip",
-    ".tar",
-    ".gz",
-    ".bz2",
-    ".xz",
-    ".7z",
-    ".rar",
-    # Python compiled
-    ".pyc",
-    ".pyo",
-    ".pyd",
-    # System files
-    ".lock",
-    ".log",
-    ".tmp",
-    ".temp",
-    ".cache",
-    # Media files (large binaries)
-    # TODO: revisit once audio/video parsers land — these will need to move
-    # out of the skip list and into the parser registry as new asset types.
-    ".mp4",
-    ".mp3",
-    ".wav",
-    ".avi",
-    ".mov",
-    ".flac",
-    # Font files
-    ".ttf",
-    ".otf",
-    ".woff",
-    ".woff2",
-})
+# Re-exported under the historical names so callers and tests that imported
+# them from this module keep working.
+ALWAYS_SKIP_DIRS = INDEX_SKIP_DIRS
+SKIP_EXTENSIONS = INDEX_SKIP_EXTENSIONS
+
+# Filename used for per-directory force-include patterns. Patterns inside a
+# `.librariantrack` file behave like inverse `.gitignore` patterns: anything
+# matched is indexed even if it would otherwise be skipped.
+LIBRARIANTRACK_FILENAME = ".librariantrack"
 
 
 class GitignoreMatcher:
@@ -90,29 +45,7 @@ class GitignoreMatcher:
     def _build_spec(self) -> GitIgnoreSpec | None:
         if not self.root.is_dir():
             return None
-
-        lines: list[str] = []
-        # Sort so outer .gitignore files come before inner ones; later lines
-        # win in GitIgnoreSpec, which matches git's "deeper file overrides".
-        gitignores = sorted(
-            self.root.rglob(".gitignore"),
-            key=lambda p: len(p.parts),
-        )
-        for gitignore in gitignores:
-            try:
-                rel_dir = gitignore.parent.resolve().relative_to(self.root)
-            except ValueError:
-                continue
-            prefix = "" if rel_dir == Path(".") else f"{rel_dir.as_posix()}/"
-            try:
-                content = gitignore.read_text(encoding="utf-8", errors="ignore")
-            except OSError:
-                continue
-            for raw in content.splitlines():
-                pattern = _prefix_pattern(raw, prefix)
-                if pattern is not None:
-                    lines.append(pattern)
-
+        lines = _collect_anchored_patterns(self.root, ".gitignore")
         if not lines:
             return None
         return GitIgnoreSpec.from_lines(lines)
@@ -127,12 +60,68 @@ class GitignoreMatcher:
         return self._spec.match_file(rel.as_posix())
 
 
-def _prefix_pattern(raw: str, prefix: str) -> str | None:
-    """Translate a single .gitignore line to be anchored under `prefix`.
+class LibrarianTrackMatcher:
+    """Tells whether a file is force-included by a `.librariantrack` file.
 
-    Returns None for blank lines and comments. `prefix` is the gitignore's
+    `.librariantrack` patterns work like `.gitignore` patterns but inverted:
+    a match means "track this file no matter what other skip rules say".
+    Patterns are anchored to the containing directory the same way gitignore
+    patterns are.
+    """
+
+    def __init__(self, root: Path) -> None:
+        self.root = root.resolve()
+        self._spec: GitIgnoreSpec | None = self._build_spec()
+
+    def _build_spec(self) -> GitIgnoreSpec | None:
+        if not self.root.is_dir():
+            return None
+        lines = _collect_anchored_patterns(self.root, LIBRARIANTRACK_FILENAME)
+        if not lines:
+            return None
+        return GitIgnoreSpec.from_lines(lines)
+
+    def is_tracked(self, file_path: Path) -> bool:
+        if self._spec is None:
+            return False
+        try:
+            rel = file_path.resolve().relative_to(self.root)
+        except ValueError:
+            return False
+        return self._spec.match_file(rel.as_posix())
+
+
+def _collect_anchored_patterns(root: Path, filename: str) -> list[str]:
+    """Aggregate patterns from every file named `filename` under `root`.
+
+    Outer files come before inner ones so later (deeper) lines win, matching
+    git's "deeper file overrides" semantics.
+    """
+    lines: list[str] = []
+    files = sorted(root.rglob(filename), key=lambda p: len(p.parts))
+    for f in files:
+        try:
+            rel_dir = f.parent.resolve().relative_to(root)
+        except ValueError:
+            continue
+        prefix = "" if rel_dir == Path(".") else f"{rel_dir.as_posix()}/"
+        try:
+            content = f.read_text(encoding="utf-8", errors="ignore")
+        except OSError:
+            continue
+        for raw in content.splitlines():
+            pattern = _prefix_pattern(raw, prefix)
+            if pattern is not None:
+                lines.append(pattern)
+    return lines
+
+
+def _prefix_pattern(raw: str, prefix: str) -> str | None:
+    """Translate a single gitignore-style line to be anchored under `prefix`.
+
+    Returns None for blank lines and comments. `prefix` is the file's
     directory relative to the matcher root, with a trailing slash (or empty
-    string when the gitignore lives at the root).
+    string when the file lives at the root).
     """
     line = raw.rstrip()
     if not line or line.startswith("#"):
@@ -145,7 +134,7 @@ def _prefix_pattern(raw: str, prefix: str) -> str | None:
     if not prefix:
         return ("!" + line) if negate else line
 
-    # Determine whether the pattern is anchored to its gitignore's directory.
+    # Determine whether the pattern is anchored to its directory.
     # Per git: a leading '/' or any '/' before the end of the pattern anchors
     # it; otherwise the pattern matches at any depth under that directory.
     stripped = line.rstrip("/")
@@ -158,26 +147,67 @@ def _prefix_pattern(raw: str, prefix: str) -> str | None:
     return ("!" + new) if negate else new
 
 
+def _is_force_included(
+    file_path: Path,
+    force_include: frozenset[Path] | None,
+    track_matcher: LibrarianTrackMatcher | None,
+) -> bool:
+    """A force-include match overrides every skip rule except unparseable types."""
+    if force_include:
+        resolved = file_path.resolve()
+        for forced in force_include:
+            try:
+                resolved.relative_to(forced)
+            except ValueError:
+                continue
+            return True
+    return track_matcher is not None and track_matcher.is_tracked(file_path)
+
+
+def normalize_force_include(paths: list[str] | None) -> frozenset[Path]:
+    """Resolve a list of user-supplied force-include paths.
+
+    Non-existent paths are dropped silently — they cannot match anything, and
+    surfacing them as errors would force callers to validate before us.
+    """
+    if not paths:
+        return frozenset()
+    out: set[Path] = set()
+    for raw in paths:
+        try:
+            p = Path(raw).expanduser().resolve()
+        except OSError:
+            continue
+        if p.exists():
+            out.add(p)
+    return frozenset(out)
+
+
 def should_skip_file(
     file_path: Path,
     supported_extensions: set[str],
     gitignore_matcher: GitignoreMatcher | None = None,
+    force_include: frozenset[Path] | None = None,
+    track_matcher: LibrarianTrackMatcher | None = None,
 ) -> bool:
     """Decide whether a file should be skipped during indexing.
 
-    Hardcoded baseline (always applied): cache/VCS directories, binary
-    extensions, hidden files, and files lacking a supported extension.
-    When `gitignore_matcher` is provided, files it marks as ignored are
-    also skipped.
+    Force-include (via `force_include` paths or a `.librariantrack` match)
+    bypasses the skip-dirs baseline and any `.gitignore` rule. It does not
+    bypass unparseable file types (unsupported or binary extensions, hidden
+    files, files without an extension) because the indexer can't process them.
     """
-    for parent in file_path.parents:
-        if parent.name in ALWAYS_SKIP_DIRS:
-            return True
+    forced = _is_force_included(file_path, force_include, track_matcher)
+
+    if not forced:
+        for parent in file_path.parents:
+            if parent.name in INDEX_SKIP_DIRS:
+                return True
 
     if file_path.name.startswith("."):
         return True
 
-    if file_path.suffix.lower() in SKIP_EXTENSIONS:
+    if file_path.suffix.lower() in INDEX_SKIP_EXTENSIONS:
         return True
 
     if not file_path.suffix:
@@ -185,5 +215,8 @@ def should_skip_file(
 
     if file_path.suffix.lower() not in supported_extensions:
         return True
+
+    if forced:
+        return False
 
     return gitignore_matcher is not None and gitignore_matcher.is_ignored(file_path)

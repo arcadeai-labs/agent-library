@@ -44,6 +44,40 @@ def safe_bool(value: str | None, default: bool) -> bool:
 
 DOCUMENTS_PATH = os.path.abspath(os.path.expanduser(os.getenv("DOCUMENTS_PATH", "./documents")))
 
+# =============================================================================
+# Indexing Skip Defaults
+# =============================================================================
+
+# Directories that are skipped during indexing unless explicitly overridden
+# (via --force-include or a .librariantrack entry). Override the default set
+# with INDEX_SKIP_DIRS as a comma-separated list.
+_DEFAULT_INDEX_SKIP_DIRS = (
+    "__pycache__,.git,.svn,.hg,node_modules,.venv,venv,"
+    ".pytest_cache,.mypy_cache,.ruff_cache,__MACOSX,.DS_Store"
+)
+INDEX_SKIP_DIRS: frozenset[str] = frozenset(
+    d.strip()
+    for d in os.getenv("INDEX_SKIP_DIRS", _DEFAULT_INDEX_SKIP_DIRS).split(",")
+    if d.strip()
+)
+
+# File extensions that are skipped during indexing (binary / archive / media).
+# Override with INDEX_SKIP_EXTENSIONS as a comma-separated list (include the dot).
+_DEFAULT_INDEX_SKIP_EXTENSIONS = (
+    ".exe,.bin,.dll,.so,.dylib,.a,.o,"
+    ".dmg,.iso,.img,.app,.pkg,"
+    ".zip,.tar,.gz,.bz2,.xz,.7z,.rar,"
+    ".pyc,.pyo,.pyd,"
+    ".lock,.log,.tmp,.temp,.cache,"
+    ".mp4,.mp3,.wav,.avi,.mov,.flac,"
+    ".ttf,.otf,.woff,.woff2"
+)
+INDEX_SKIP_EXTENSIONS: frozenset[str] = frozenset(
+    e.strip().lower()
+    for e in os.getenv("INDEX_SKIP_EXTENSIONS", _DEFAULT_INDEX_SKIP_EXTENSIONS).split(",")
+    if e.strip()
+)
+
 DATABASE_PATH = os.path.abspath(
     os.path.expanduser(os.getenv("DATABASE_PATH", "~/.librarian/index.db"))
 )

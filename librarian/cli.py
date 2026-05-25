@@ -37,7 +37,12 @@ from rich.console import Console
 from rich.panel import Panel
 from rich.table import Table
 
-from librarian.sources.ignore import GitignoreMatcher, should_skip_file
+from librarian.sources.ignore import (
+    GitignoreMatcher,
+    LibrarianTrackMatcher,
+    normalize_force_include,
+    should_skip_file,
+)
 
 # Initialize Typer app
 app = typer.Typer(
@@ -222,9 +227,17 @@ def _should_skip_file(
     file_path: Path,
     supported_extensions: set[str],
     gitignore_matcher: "GitignoreMatcher | None" = None,
+    force_include: "frozenset[Path] | None" = None,
+    track_matcher: "LibrarianTrackMatcher | None" = None,
 ) -> bool:
     """Check if a file should be skipped during indexing."""
-    return should_skip_file(file_path, supported_extensions, gitignore_matcher)
+    return should_skip_file(
+        file_path,
+        supported_extensions,
+        gitignore_matcher,
+        force_include=force_include,
+        track_matcher=track_matcher,
+    )
 
 
 def _find_source(name_or_path: str) -> dict | None:
@@ -428,6 +441,19 @@ def add_source(
             help="Index files even when matched by a .gitignore in the source tree",
         ),
     ] = False,
+    force_include: Annotated[
+        Optional[list[str]],
+        typer.Option(
+            "--force-include",
+            help=(
+                "Path to always index, even when matched by .gitignore or by the "
+                "skip-dirs baseline (node_modules, __pycache__, .venv, etc.). "
+                "Pointing at a directory force-includes everything beneath it. "
+                "Can be repeated. A .librariantrack file inside the source has "
+                "the same effect for patterns it lists."
+            ),
+        ),
+    ] = None,
 ) -> None:
     """Add a file or directory as a source and index it recursively."""
     cfg = _get_config()
@@ -474,12 +500,20 @@ def add_source(
                 files_to_index.extend(source_path.rglob(f"*{ext}"))
 
         gitignore_matcher = None if include_ignored else GitignoreMatcher(source_path)
+        track_matcher = LibrarianTrackMatcher(source_path)
+        forced_paths = normalize_force_include(force_include)
 
         # Filter out system/binary files and .gitignore matches
         files_to_index = [
             f
             for f in files_to_index
-            if not _should_skip_file(f, supported_extensions, gitignore_matcher)
+            if not _should_skip_file(
+                f,
+                supported_extensions,
+                gitignore_matcher,
+                force_include=forced_paths,
+                track_matcher=track_matcher,
+            )
         ]
 
         # Apply pattern filter
@@ -525,6 +559,7 @@ def add_source(
         "pattern": pattern,
         "exclude": exclude,
         "include_ignored": include_ignored,
+        "force_include": list(force_include) if force_include else [],
         "added_at": datetime.now().isoformat(),
     }
 
@@ -557,6 +592,7 @@ def add_source(
                 context=None,  # type: ignore[arg-type]
                 directory=str(source_path),
                 include_ignored=include_ignored,
+                force_include=list(force_include) if force_include else None,
             )
         )
 
@@ -838,6 +874,7 @@ def index_build(
                     context=None,  # type: ignore[arg-type]
                     directory=str(src_path),
                     include_ignored=bool(src.get("include_ignored", False)),
+                    force_include=list(src.get("force_include") or []) or None,
                 )
             )
             total_indexed += result.get("indexed", 0) + result.get("updated", 0)
