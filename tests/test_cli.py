@@ -53,7 +53,12 @@ def test_add_directory_exits_nonzero_when_indexing_errors(
     monkeypatch.setattr(cli, "_get_config", lambda: {"ensure_directories": lambda: None})
     monkeypatch.setattr(cli, "console", Console(width=500, color_system=None))
 
-    async def fake_server_ingest(context: Any, directory: str) -> dict[str, Any]:
+    async def fake_server_ingest(
+        context: Any,
+        directory: str,
+        include_ignored: bool = False,
+        force_include: list[str] | None = None,
+    ) -> dict[str, Any]:
         return {
             "directory": directory,
             "total_files": 1,

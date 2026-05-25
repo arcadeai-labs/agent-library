@@ -37,6 +37,13 @@ from rich.console import Console
 from rich.panel import Panel
 from rich.table import Table
 
+from librarian.sources.ignore import (
+    GitignoreMatcher,
+    LibrarianTrackMatcher,
+    normalize_force_include,
+    should_skip_file,
+)
+
 # Initialize Typer app
 app = typer.Typer(
     name="libr",
@@ -216,100 +223,21 @@ def _get_config() -> dict[str, Any]:
     }
 
 
-def _should_skip_file(file_path: Path, supported_extensions: set[str]) -> bool:
-    """
-    Check if a file should be skipped during indexing.
-
-    Args:
-        file_path: Path to the file.
-        supported_extensions: Set of supported extensions.
-
-    Returns:
-        True if the file should be skipped.
-    """
-    # Skip system/hidden directories
-    skip_dirs = {
-        "__pycache__",
-        ".git",
-        ".svn",
-        ".hg",
-        "node_modules",
-        ".venv",
-        "venv",
-        ".pytest_cache",
-        ".mypy_cache",
-        ".ruff_cache",
-        "__MACOSX",
-        ".DS_Store",
-    }
-
-    # Check if file is in a skipped directory
-    for parent in file_path.parents:
-        if parent.name in skip_dirs:
-            return True
-
-    # Skip hidden files (starting with .)
-    if file_path.name.startswith("."):
-        return True
-
-    # Skip binary/system file extensions
-    skip_extensions = {
-        # Executables and binaries
-        ".exe",
-        ".bin",
-        ".dll",
-        ".so",
-        ".dylib",
-        ".a",
-        ".o",
-        # Disk images and archives
-        ".dmg",
-        ".iso",
-        ".img",
-        ".app",
-        ".pkg",
-        # Compressed archives
-        ".zip",
-        ".tar",
-        ".gz",
-        ".bz2",
-        ".xz",
-        ".7z",
-        ".rar",
-        # Python compiled
-        ".pyc",
-        ".pyo",
-        ".pyd",
-        # System files
-        ".lock",
-        ".log",
-        ".tmp",
-        ".temp",
-        ".cache",
-        # Media files (large binaries)
-        ".mp4",
-        ".mp3",
-        ".wav",
-        ".avi",
-        ".mov",
-        ".flac",
-        # Font files
-        ".ttf",
-        ".otf",
-        ".woff",
-        ".woff2",
-    }
-
-    if file_path.suffix.lower() in skip_extensions:
-        return True
-
-    # Skip files without extensions unless they're in supported list
-    # (e.g., README is supported, but random no-extension files aren't)
-    if not file_path.suffix:
-        return True
-
-    # Skip if extension not in supported list
-    return file_path.suffix.lower() not in supported_extensions
+def _should_skip_file(
+    file_path: Path,
+    supported_extensions: set[str],
+    gitignore_matcher: "GitignoreMatcher | None" = None,
+    force_include: "frozenset[Path] | None" = None,
+    track_matcher: "LibrarianTrackMatcher | None" = None,
+) -> bool:
+    """Check if a file should be skipped during indexing."""
+    return should_skip_file(
+        file_path,
+        supported_extensions,
+        gitignore_matcher,
+        force_include=force_include,
+        track_matcher=track_matcher,
+    )
 
 
 def _find_source(name_or_path: str) -> dict | None:
@@ -506,6 +434,26 @@ def add_source(
     verbose: Annotated[
         bool, typer.Option("--verbose", "-v", help="Show files being indexed")
     ] = False,
+    include_ignored: Annotated[
+        bool,
+        typer.Option(
+            "--include-ignored",
+            help="Index files even when matched by a .gitignore in the source tree",
+        ),
+    ] = False,
+    force_include: Annotated[
+        Optional[list[str]],
+        typer.Option(
+            "--force-include",
+            help=(
+                "Path to always index, even when matched by .gitignore or by the "
+                "skip-dirs baseline (node_modules, __pycache__, .venv, etc.). "
+                "Pointing at a directory force-includes everything beneath it. "
+                "Can be repeated. A .librariantrack file inside the source has "
+                "the same effect for patterns it lists."
+            ),
+        ),
+    ] = None,
 ) -> None:
     """Add a file or directory as a source and index it recursively."""
     cfg = _get_config()
@@ -551,9 +499,21 @@ def add_source(
             else:
                 files_to_index.extend(source_path.rglob(f"*{ext}"))
 
-        # Filter out system/binary files
+        gitignore_matcher = None if include_ignored else GitignoreMatcher(source_path)
+        track_matcher = LibrarianTrackMatcher(source_path)
+        forced_paths = normalize_force_include(force_include)
+
+        # Filter out system/binary files and .gitignore matches
         files_to_index = [
-            f for f in files_to_index if not _should_skip_file(f, supported_extensions)
+            f
+            for f in files_to_index
+            if not _should_skip_file(
+                f,
+                supported_extensions,
+                gitignore_matcher,
+                force_include=forced_paths,
+                track_matcher=track_matcher,
+            )
         ]
 
         # Apply pattern filter
@@ -598,6 +558,8 @@ def add_source(
         "depth": depth,
         "pattern": pattern,
         "exclude": exclude,
+        "include_ignored": include_ignored,
+        "force_include": list(force_include) if force_include else [],
         "added_at": datetime.now().isoformat(),
     }
 
@@ -629,6 +591,8 @@ def add_source(
             server_ingest(
                 context=None,  # type: ignore[arg-type]
                 directory=str(source_path),
+                include_ignored=include_ignored,
+                force_include=list(force_include) if force_include else None,
             )
         )
 
@@ -909,6 +873,8 @@ def index_build(
                 server_ingest(
                     context=None,  # type: ignore[arg-type]
                     directory=str(src_path),
+                    include_ignored=bool(src.get("include_ignored", False)),
+                    force_include=list(src.get("force_include") or []) or None,
                 )
             )
             total_indexed += result.get("indexed", 0) + result.get("updated", 0)
