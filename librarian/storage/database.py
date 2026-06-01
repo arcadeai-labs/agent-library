@@ -10,6 +10,7 @@ import logging
 import sqlite3
 import struct
 import threading
+import warnings
 from collections.abc import Generator
 from contextlib import contextmanager
 from datetime import date, datetime
@@ -28,6 +29,24 @@ from librarian.storage.migrations import run_migrations
 from librarian.types import AssetType, Chunk, Document, EmbeddingModality
 
 logger = logging.getLogger(__name__)
+
+
+def _warn_deprecated_mutator(method: str) -> None:
+    """Emit a ``DeprecationWarning`` for a direct ``Database`` mutator call.
+
+    As of v0.14 the write path is the ``Orchestrator`` (driven by connectors).
+    Direct ``Database`` mutators are retained for backward compatibility and
+    internal fallbacks, but new code should write through ``Orchestrator`` /
+    ``SQLiteStorage``. Python hides ``DeprecationWarning`` outside ``__main__`` by
+    default, so this is silent at normal CLI runtime and visible under pytest.
+    """
+    warnings.warn(
+        f"Database.{method}() is deprecated and will be removed in v0.15; "
+        "write through librarian.orchestrator.Orchestrator (with a connector) "
+        "or librarian.storage.SQLiteStorage instead.",
+        DeprecationWarning,
+        stacklevel=3,
+    )
 
 
 def _json_default(value: Any) -> str:
@@ -130,9 +149,13 @@ class Database:
         return conn
 
     @contextmanager
-    def connection(self) -> Generator[sqlite3.Connection, None, None]:
+    def _connection(self) -> Generator[sqlite3.Connection, None, None]:
         """
-        Context manager for database connections.
+        Context manager for database connections (private as of v0.14).
+
+        The public ``connection()`` accessor was removed in v0.14: external code
+        must go through ``Orchestrator`` / ``Storage`` rather than reaching into
+        raw connections. Kept private for internal store implementations.
 
         Yields:
             A sqlite3 connection with sqlite-vec loaded.
@@ -178,7 +201,7 @@ class Database:
 
     def _init_schema(self) -> None:
         """Initialize the database schema."""
-        with self.connection() as conn:
+        with self._connection() as conn:
             # Check for dimension mismatch before creating tables
             existing_dim = self._get_vector_dimension(conn)
             expected_dim = get_effective_embedding_dimension()
@@ -289,7 +312,8 @@ class Database:
         Returns:
             The ID of the inserted document.
         """
-        with self._lock, self.connection() as conn:
+        _warn_deprecated_mutator("insert_document")
+        with self._lock, self._connection() as conn:
             cursor = conn.execute(
                 """
                 INSERT INTO documents (path, title, content, metadata, file_mtime, asset_type)
@@ -315,7 +339,8 @@ class Database:
         Args:
             document: The document to update (must have an id).
         """
-        with self._lock, self.connection() as conn:
+        _warn_deprecated_mutator("update_document")
+        with self._lock, self._connection() as conn:
             conn.execute(
                 """
                 UPDATE documents
@@ -346,7 +371,7 @@ class Database:
         Returns:
             The document if found, None otherwise.
         """
-        with self.connection() as conn:
+        with self._connection() as conn:
             row = conn.execute("SELECT * FROM documents WHERE path = ?", (path,)).fetchone()
             if row:
                 asset_type = AssetType(row["asset_type"]) if row["asset_type"] else AssetType.TEXT
@@ -373,7 +398,7 @@ class Database:
         Returns:
             The document if found, None otherwise.
         """
-        with self.connection() as conn:
+        with self._connection() as conn:
             row = conn.execute("SELECT * FROM documents WHERE id = ?", (doc_id,)).fetchone()
             if row:
                 asset_type = AssetType(row["asset_type"]) if row["asset_type"] else AssetType.TEXT
@@ -390,6 +415,38 @@ class Database:
                 )
             return None
 
+    def get_chunk_public_fields(self, chunk_ids: list[int]) -> dict[int, dict[str, Any]]:
+        """Fetch v0.14 public fields for a set of internal chunk row ids.
+
+        Returns a mapping of ``chunks.id`` -> ``{chunk_id, chunk_index,
+        document_size, source_created_at, chunk_source_uri}``. Used by the MCP
+        layer to enrich search results without threading the new columns through
+        the whole retrieval pipeline (the deterministic-id cutover is tracked
+        separately).
+        """
+        if not chunk_ids:
+            return {}
+        placeholders = ",".join("?" for _ in chunk_ids)
+        with self._connection() as conn:
+            rows = conn.execute(
+                f"""
+                SELECT id, chunk_id, chunk_index, document_size,
+                       source_created_at, chunk_source_uri
+                FROM chunks WHERE id IN ({placeholders})
+                """,  # noqa: S608 - placeholders are parameter markers
+                tuple(chunk_ids),
+            ).fetchall()
+        return {
+            row["id"]: {
+                "chunk_id": row["chunk_id"],
+                "chunk_index": row["chunk_index"],
+                "document_size": row["document_size"],
+                "source_created_at": row["source_created_at"],
+                "chunk_source_uri": row["chunk_source_uri"],
+            }
+            for row in rows
+        }
+
     def delete_document(self, doc_id: int) -> None:
         """
         Delete a document and all its chunks.
@@ -397,7 +454,8 @@ class Database:
         Args:
             doc_id: The document ID to delete.
         """
-        with self._lock, self.connection() as conn:
+        _warn_deprecated_mutator("delete_document")
+        with self._lock, self._connection() as conn:
             # Delete embeddings from all modality tables
             for table in ["chunk_embeddings", "vec_chunks_code", "vec_chunks_vision"]:
                 conn.execute(
@@ -420,9 +478,12 @@ class Database:
         Returns:
             True if a document was deleted, False otherwise.
         """
+        _warn_deprecated_mutator("delete_document_by_path")
         doc = self.get_document_by_path(path)
         if doc and doc.id:
-            self.delete_document(doc.id)
+            with warnings.catch_warnings():
+                warnings.simplefilter("ignore", DeprecationWarning)
+                self.delete_document(doc.id)
             return True
         return False
 
@@ -441,7 +502,7 @@ class Database:
         Returns:
             List of documents matching the criteria.
         """
-        with self.connection() as conn:
+        with self._connection() as conn:
             if start_date and end_date:
                 rows = conn.execute(
                     """
@@ -510,7 +571,7 @@ class Database:
         """
         start_ts = start_date.timestamp()
         end_ts = end_date.timestamp()
-        with self.connection() as conn:
+        with self._connection() as conn:
             rows = conn.execute(
                 """
                 SELECT id FROM documents
@@ -539,7 +600,8 @@ class Database:
         Returns:
             The ID of the inserted chunk.
         """
-        with self._lock, self.connection() as conn:
+        _warn_deprecated_mutator("insert_chunk")
+        with self._lock, self._connection() as conn:
             cursor = conn.execute(
                 """
                 INSERT INTO chunks
@@ -586,8 +648,9 @@ class Database:
         Returns:
             List of inserted chunk IDs.
         """
+        _warn_deprecated_mutator("insert_chunks_batch")
         chunk_ids = []
-        with self._lock, self.connection() as conn:
+        with self._lock, self._connection() as conn:
             for chunk in chunks:
                 cursor = conn.execute(
                     """
@@ -636,7 +699,7 @@ class Database:
         Returns:
             List of chunks for the document.
         """
-        with self.connection() as conn:
+        with self._connection() as conn:
             rows = conn.execute(
                 """
                 SELECT c.*, ce.embedding as text_emb, cc.embedding as code_emb, cv.embedding as vision_emb
@@ -690,7 +753,8 @@ class Database:
         Args:
             doc_id: The document ID.
         """
-        with self._lock, self.connection() as conn:
+        _warn_deprecated_mutator("delete_chunks_by_document")
+        with self._lock, self._connection() as conn:
             # Delete from all embedding tables
             for table in ["chunk_embeddings", "vec_chunks_code", "vec_chunks_vision"]:
                 conn.execute(
@@ -713,7 +777,7 @@ class Database:
         Returns:
             Dictionary with statistics about documents and chunks.
         """
-        with self.connection() as conn:
+        with self._connection() as conn:
             doc_count = conn.execute("SELECT COUNT(*) FROM documents").fetchone()[0]
             chunk_count = conn.execute("SELECT COUNT(*) FROM chunks").fetchone()[0]
             embedding_count = conn.execute("SELECT COUNT(*) FROM chunk_embeddings").fetchone()[0]
@@ -734,7 +798,7 @@ class Database:
         """
         import contextlib
 
-        with self._lock, self.connection() as conn:
+        with self._lock, self._connection() as conn:
             # Delete in order respecting foreign keys, ignore missing tables
             for table in ["chunk_fts", "chunk_embeddings", "chunks", "documents"]:
                 with contextlib.suppress(Exception):

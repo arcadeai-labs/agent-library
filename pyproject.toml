@@ -48,6 +48,7 @@ dev = [
     "pre-commit>=3.4.0",
     "ruff>=0.7.4",
     "types-pyyaml>=6.0.1",
+    "import-linter>=2.0",
 ]
 code = [
     "tree-sitter>=0.21.0",
@@ -83,6 +84,45 @@ docs = [
 [build-system]
 requires = ["hatchling"]
 build-backend = "hatchling.build"
+
+# import-linter: wall off private internals from the sanctioned forward path.
+# Consumers (downstream products, third parties) should depend on the public
+# surface -- connectors, the Orchestrator, the Storage protocols, types/config --
+# not on private modules like librarian.storage.database or librarian.indexing.
+# These contracts enforce the parts of that boundary observable within this repo:
+# connectors stay storage/indexing-free, and the abstract storage protocols never
+# pull in a concrete backend.
+[tool.importlinter]
+root_package = "librarian"
+include_external_packages = false
+
+[[tool.importlinter.contracts]]
+name = "Connectors are stateless: no storage, indexing, server, or CLI imports"
+type = "forbidden"
+source_modules = ["librarian.connectors"]
+forbidden_modules = [
+    "librarian.storage.database",
+    "librarian.storage.sqlite_storage",
+    "librarian.storage.vector_store",
+    "librarian.storage.fts_store",
+    "librarian.indexing",
+    "librarian.server",
+    "librarian.cli",
+]
+
+[[tool.importlinter.contracts]]
+name = "Storage protocols stay abstract: no direct concrete backend imports"
+type = "forbidden"
+source_modules = ["librarian.storage.protocols"]
+forbidden_modules = [
+    "librarian.storage.database",
+    "librarian.storage.sqlite_storage",
+]
+# Only direct imports: protocols references the read-side result types
+# (fts_store / vector_store) under TYPE_CHECKING, which transitively reach the
+# concrete Database. We forbid protocols from *directly* depending on a concrete
+# write backend, not those typing-only edges.
+allow_indirect_imports = true
 
 [tool.hatch.build.targets.wheel]
 packages = ["librarian"]

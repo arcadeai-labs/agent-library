@@ -43,7 +43,6 @@ from librarian.config import (
     SERVER_PORT,
     ensure_directories,
 )
-from librarian.indexing import get_indexing_service
 from librarian.processing.embed import get_embedder
 from librarian.processing.parsers.base import FileReadError, FileReadTimeoutError
 from librarian.retrieval.search import HybridSearcher
@@ -98,8 +97,13 @@ def _get_searcher() -> HybridSearcher:
 
 
 def _process_and_index_file(file_path: Path) -> dict[str, Any]:
-    """Process a markdown file and add it to the index."""
-    return get_indexing_service().index_file(file_path)
+    """Process a file and add it to the index via the v0.14 Orchestrator."""
+    from librarian.orchestrator import Orchestrator
+    from librarian.storage.sqlite_storage import SQLiteStorage
+
+    storage = SQLiteStorage(database=get_database())
+    storage.migrate()
+    return Orchestrator(storage=storage).index_file(file_path)
 
 
 def _should_skip_file(
@@ -866,19 +870,33 @@ async def search_library(
         filter_set = set(filter_doc_ids)
         results = [r for r in results if r.document_id in filter_set]
 
-    return [
-        SearchHit(
-            chunk_id=r.chunk_id,
-            document_id=r.document_id,
-            document_path=r.document_path,
-            content=r.content,
-            heading_path=r.heading_path,
-            score=round(r.score, 4),
-            snippet=r.snippet,
-            asset_type=r.asset_type.value,
+    # Enrich with the v0.14 public columns. SearchResult still carries the
+    # integer surrogate (chunks.id); map it to the deterministic text chunk_id
+    # and the additive fields. Legacy rows (pre-rebuild) fall back to the
+    # surrogate id rendered as a string.
+    enrichment = db.get_chunk_public_fields([r.chunk_id for r in results])
+
+    hits: list[SearchHit] = []
+    for r in results:
+        extra = enrichment.get(r.chunk_id, {})
+        text_chunk_id = extra.get("chunk_id") or str(r.chunk_id)
+        hits.append(
+            SearchHit(
+                chunk_id=text_chunk_id,
+                document_id=r.document_id,
+                document_path=r.document_path,
+                content=r.content,
+                heading_path=r.heading_path,
+                score=round(r.score, 4),
+                snippet=r.snippet,
+                asset_type=r.asset_type.value,
+                chunk_source_uri=extra.get("chunk_source_uri"),
+                chunk_index=extra.get("chunk_index"),
+                document_size=extra.get("document_size"),
+                source_created_at=extra.get("source_created_at"),
+            )
         )
-        for r in results
-    ]
+    return hits
 
 
 # =============================================================================

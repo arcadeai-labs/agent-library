@@ -69,7 +69,7 @@ class FTSStore:
         # Users can still use FTS5 syntax by quoting terms
         safe_query = self._prepare_query(query)
 
-        with self.db.connection() as conn:
+        with self.db._connection() as conn:
             rows = conn.execute(
                 """
                 SELECT
@@ -127,7 +127,7 @@ class FTSStore:
 
         safe_query = self._prepare_query(query)
 
-        with self.db.connection() as conn:
+        with self.db._connection() as conn:
             rows = conn.execute(
                 """
                 SELECT
@@ -222,7 +222,7 @@ class FTSStore:
         """
         safe_query = self._prepare_query(query)
 
-        with self.db.connection() as conn:
+        with self.db._connection() as conn:
             row = conn.execute(
                 """
                 SELECT highlight(chunks_fts, 0, ?, ?) as highlighted

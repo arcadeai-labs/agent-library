@@ -66,6 +66,19 @@ app.add_typer(config_app, name="config")
 
 console = Console()
 
+# Command groups exempt from the startup schema guard: the `index` group owns the
+# rebuild/clean/clobber remedies (and guards its own stats view), while `version`
+# and `config` don't touch the library database.
+_SCHEMA_GUARD_EXEMPT = {None, "index", "version", "config"}
+
+
+@app.callback()
+def _main(ctx: typer.Context) -> None:
+    """Top-level entry: refuse to run normal commands on a pre-v0.14 database."""
+    if ctx.invoked_subcommand in _SCHEMA_GUARD_EXEMPT:
+        return
+    _guard_schema_or_exit()
+
 # Config file path
 CONFIG_DIR = Path.home() / ".librarian"
 SOURCES_FILE = CONFIG_DIR / "sources.json"
@@ -282,6 +295,128 @@ def _index_path(file_path: Path, verbose: bool = False) -> dict[str, Any]:
         elif status == "updated":
             rprint(f"  [yellow]~[/yellow] {file_path}")
     return result
+
+
+def _guard_schema_or_exit() -> None:
+    """Refuse to run against a pre-v0.14 database; point the user at the rebuild.
+
+    Detection is cheap (a plain sqlite connection, no sqlite-vec load) so this is
+    safe to call at the start of every command that touches the library.
+    """
+    from librarian.storage.schema_version import (
+        REBUILD_MESSAGE,
+        schema_status_for_path,
+    )
+
+    db_path = _get_config().get("DATABASE_PATH")
+    if not db_path:
+        return
+    if schema_status_for_path(db_path) == "v0.13":
+        rprint(
+            Panel(
+                REBUILD_MESSAGE,
+                title="[red]Database upgrade required[/red]",
+                border_style="red",
+            )
+        )
+        raise typer.Exit(1)
+
+
+def _reindex_sources(
+    sources: list[dict[str, Any]], verbose: bool = False
+) -> tuple[int, int]:
+    """Re-ingest the given sources via the Orchestrator-backed ingest path.
+
+    Returns ``(total_indexed, total_errors)``.
+    """
+    from librarian.server import index_directory_to_library as server_ingest
+
+    total_indexed = 0
+    total_errors = 0
+    for src in sources:
+        src_path = Path(src["path"])
+        if not src_path.exists():
+            rprint(f"[yellow]Skipping missing:[/yellow] {src['name']}")
+            continue
+
+        rprint(f"  {src['name']}...")
+
+        if src.get("is_file"):
+            try:
+                _index_path(src_path, verbose)
+                total_indexed += 1
+            except Exception as e:
+                rprint(f"  [red]Error:[/red] {e}")
+                total_errors += 1
+        else:
+            result = _run_async(
+                server_ingest(
+                    context=None,  # type: ignore[arg-type]
+                    directory=str(src_path),
+                    include_ignored=bool(src.get("include_ignored", False)),
+                    force_include=list(src.get("force_include") or []) or None,
+                )
+            )
+            total_indexed += result.get("indexed", 0) + result.get("updated", 0)
+            total_errors += len(result.get("errors", []))
+
+            if verbose:
+                for file_info in result.get("files", []):
+                    if file_info.get("status") in ("created", "updated"):
+                        rprint(f"    [green]+[/green] {file_info.get('path', '')}")
+
+    return total_indexed, total_errors
+
+
+def _rebuild_v014(*, no_backup: bool = False, verbose: bool = False) -> None:
+    """v0.13 -> v0.14 rebuild: back up, wipe, recreate under v0.14, re-ingest.
+
+    This is the one sanctioned remedy for a pre-v0.14 database. It backs up the
+    existing file to ``<db>.v0-backup`` (unless ``no_backup``), deletes and
+    recreates the database under the v0.14 schema, and re-ingests every
+    configured source through ``LocalFileConnector`` + ``Orchestrator``.
+    """
+    import shutil
+
+    from librarian.storage import database as db_module
+    from librarian.storage.database import get_database
+    from librarian.storage.sqlite_storage import SQLiteStorage
+
+    cfg = _get_config()
+    cfg["ensure_directories"]()
+    db_path = Path(cfg["DATABASE_PATH"])
+
+    if db_path.exists() and not no_backup:
+        backup = Path(str(db_path) + ".v0-backup")
+        shutil.copy2(db_path, backup)
+        rprint(f"[green]Backed up[/green] database to [blue]{backup}[/blue]")
+    elif db_path.exists():
+        rprint("[yellow]Skipping backup[/yellow] (--no-backup).")
+
+    # Wipe and recreate cleanly under the v0.14 schema.
+    db_module._db_instance = None
+    if db_path.exists():
+        db_path.unlink()
+    storage = SQLiteStorage(database=get_database())
+    storage.migrate()
+    rprint("[cyan]Recreated the database under the v0.14 schema.[/cyan]")
+
+    sources = _load_sources()
+    if not sources:
+        rprint("[dim]No sources registered; nothing to re-ingest.[/dim]")
+        rprint("[green]Rebuild complete.[/green]")
+        return
+
+    rprint("[cyan]Re-ingesting sources...[/cyan]")
+    indexed, errors = _reindex_sources(sources, verbose)
+    rprint(
+        Panel(
+            f"[green]Rebuild complete![/green]\n\n"
+            f"Indexed: [cyan]{indexed}[/cyan]\n"
+            f"Errors: [red]{errors}[/red]",
+            title="Rebuild Results",
+        )
+    )
 
 
 def _get_editor() -> str:
@@ -758,13 +893,36 @@ def remove_source(
 def index_stats(
     ctx: typer.Context,
     output_json: Annotated[bool, typer.Option("--json", help="Output as JSON")] = False,
+    rebuild: Annotated[
+        bool,
+        typer.Option(
+            "--rebuild",
+            help="Back up, wipe, and recreate the index under the v0.14 schema, "
+            "then re-ingest configured sources.",
+        ),
+    ] = False,
+    no_backup: Annotated[
+        bool,
+        typer.Option("--no-backup", help="Skip the pre-rebuild database backup."),
+    ] = False,
+    verbose: Annotated[
+        bool, typer.Option("--verbose", "-v", help="Show files during rebuild.")
+    ] = False,
 ) -> None:
-    """Show index statistics."""
+    """Show index statistics, or run the v0.13 -> v0.14 rebuild with --rebuild."""
     if ctx.invoked_subcommand is not None:
         return
 
     cfg = _get_config()
     cfg["ensure_directories"]()
+
+    if rebuild:
+        _rebuild_v014(no_backup=no_backup, verbose=verbose)
+        return
+
+    # Stats is a "normal" read; refuse on a pre-v0.14 database (the index group is
+    # exempt from the top-level guard so the rebuild path stays runnable).
+    _guard_schema_or_exit()
 
     from librarian.storage.database import get_database
 
@@ -831,7 +989,6 @@ def index_build(
             rprint("[yellow]Cancelled.[/yellow]")
             raise typer.Exit(0)
 
-    from librarian.server import index_directory_to_library as server_ingest
     from librarian.storage.database import get_database
 
     db = get_database()
@@ -850,42 +1007,7 @@ def index_build(
         db.clear_all()
 
     rprint("[cyan]Rebuilding...[/cyan]")
-    total_indexed = 0
-    total_errors = 0
-
-    for src in sources:
-        src_path = Path(src["path"])
-        if not src_path.exists():
-            rprint(f"[yellow]Skipping missing:[/yellow] {src['name']}")
-            continue
-
-        rprint(f"  {src['name']}...")
-
-        if src.get("is_file"):
-            try:
-                result = _index_path(src_path, verbose)
-                total_indexed += 1
-            except Exception as e:
-                rprint(f"  [red]Error:[/red] {e}")
-                total_errors += 1
-        else:
-            result = _run_async(
-                server_ingest(
-                    context=None,  # type: ignore[arg-type]
-                    directory=str(src_path),
-                    include_ignored=bool(src.get("include_ignored", False)),
-                    force_include=list(src.get("force_include") or []) or None,
-                )
-            )
-            total_indexed += result.get("indexed", 0) + result.get("updated", 0)
-            total_errors += len(result.get("errors", []))
-
-            if verbose:
-                for file_info in result.get("files", []):
-                    fpath = file_info.get("path", "")
-                    status = file_info.get("status", "")
-                    if status in ("created", "updated"):
-                        rprint(f"    [green]+[/green] {fpath}")
+    total_indexed, total_errors = _reindex_sources(sources, verbose)
 
     rprint(
         Panel(
