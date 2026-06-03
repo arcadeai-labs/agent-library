@@ -79,6 +79,7 @@ def _main(ctx: typer.Context) -> None:
         return
     _guard_schema_or_exit()
 
+
 # Config file path
 CONFIG_DIR = Path.home() / ".librarian"
 SOURCES_FILE = CONFIG_DIR / "sources.json"
@@ -322,9 +323,7 @@ def _guard_schema_or_exit() -> None:
         raise typer.Exit(1)
 
 
-def _reindex_sources(
-    sources: list[dict[str, Any]], verbose: bool = False
-) -> tuple[int, int]:
+def _reindex_sources(sources: list[dict[str, Any]], verbose: bool = False) -> tuple[int, int]:
     """Re-ingest the given sources via the Orchestrator-backed ingest path.
 
     Returns ``(total_indexed, total_errors)``.

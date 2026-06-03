@@ -228,7 +228,9 @@ async def test_soft_delete_tombstones_without_removing_rows(storage: SQLiteStora
     await orch.sync(FakeConnector([_upsert("m1", "hello")]))
     assert _count(storage, "chunks") == 1
 
-    delete_event = DocumentSoftDelete(source_type="msg", source_native_id="m1", deletion_reason="gone")
+    delete_event = DocumentSoftDelete(
+        source_type="msg", source_native_id="m1", deletion_reason="gone"
+    )
     await orch.sync(FakeConnector([delete_event]), source_key="fake-del")
 
     # Row is still present, but tombstoned.

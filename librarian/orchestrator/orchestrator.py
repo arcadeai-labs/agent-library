@@ -33,13 +33,15 @@ from librarian.processing.parsers.registry import get_parser_for_file
 from librarian.processing.transform.chunker import Chunker, ChunkingStrategy
 from librarian.processing.transform.code import CodeChunker, chunk_code_by_blocks
 from librarian.processing.transform.pdf import PDFChunker
+from librarian.storage.factory import get_storage
 from librarian.storage.protocols import SyncState
-from librarian.storage.sqlite_storage import SQLiteStorage, get_storage
 from librarian.storage.write_models import PreparedChunk, PreparedDocument
 from librarian.types import AssetType, EmbeddingModality, ParsedDocument, TextChunk
 
 if TYPE_CHECKING:
     from PIL.Image import Image as PILImage
+
+    from librarian.storage.protocols import Storage
 
 logger = logging.getLogger(__name__)
 
@@ -62,7 +64,7 @@ class Orchestrator:
 
     def __init__(
         self,
-        storage: SQLiteStorage | None = None,
+        storage: "Storage | None" = None,
         embedder: Any = None,
     ) -> None:
         self.storage = storage or get_storage()
@@ -119,9 +121,7 @@ class Orchestrator:
                 result.documents_upserted += 1
                 result.chunks_written += len(prepared.chunks)
             elif isinstance(event, DocumentSoftDelete):
-                doc_id = ids.document_id(
-                    connector.name, event.source_type, event.source_native_id
-                )
+                doc_id = ids.document_id(connector.name, event.source_type, event.source_native_id)
                 next_cursor = event.checkpoint if event.checkpoint is not None else cursor
                 with self.storage.transaction() as conn:
                     self.storage.soft_delete_document(conn, doc_id, event.deletion_reason)
@@ -214,9 +214,7 @@ class Orchestrator:
     # =========================================================================
 
     def _prepare_upsert(self, connector: Connector, event: DocumentUpsert) -> PreparedDocument:
-        document_id = ids.document_id(
-            connector.name, event.source_type, event.source_native_id
-        )
+        document_id = ids.document_id(connector.name, event.source_type, event.source_native_id)
 
         if event.chunks is not None:
             text_chunks, asset_type, native_ids = self._chunks_from_inputs(event)
@@ -225,9 +223,7 @@ class Orchestrator:
         else:
             parsed, asset_type = self._parse(event)
             text_chunks = self._chunk_parsed(parsed, asset_type)
-            native_ids = [
-                f"{event.source_native_id}#chunk={i}" for i in range(len(text_chunks))
-            ]
+            native_ids = [f"{event.source_native_id}#chunk={i}" for i in range(len(text_chunks))]
             content = parsed.content
             title = event.title if event.title is not None else parsed.title
 
@@ -254,9 +250,7 @@ class Orchestrator:
                 embedding=embedding,
                 model_version=model_version,
             )
-            for i, (chunk, embedding) in enumerate(
-                zip(text_chunks, embeddings, strict=True)
-            )
+            for i, (chunk, embedding) in enumerate(zip(text_chunks, embeddings, strict=True))
         ]
 
         return PreparedDocument(
@@ -384,9 +378,7 @@ class Orchestrator:
             and asset_type == AssetType.IMAGE
             and not isinstance(event.raw_content, str)
         ):
-            embeddings = self._embed_image_chunks(
-                Path(event.source_native_id), chunks, embedder
-            )
+            embeddings = self._embed_image_chunks(Path(event.source_native_id), chunks, embedder)
         else:
             embeddings = embedder.embed_documents([c.content for c in chunks])
 

@@ -60,6 +60,10 @@ code = [
 pdf = [
     "pypdf>=4.0.0",
 ]
+postgres = [
+    "psycopg[binary]>=3.1.0",
+    "pgvector>=0.3.0",
+]
 ocr = [
     "pytesseract>=0.3.10",
     "Pillow>=10.0.0",
@@ -71,7 +75,7 @@ vision = [
     "torchvision>=0.15.0",
 ]
 all = [
-    "agent-library[code,pdf,ocr,vision]",
+    "agent-library[code,pdf,ocr,vision,postgres]",
 ]
 evals = [
     "arcade-mcp[evals]>=1.14.0",
@@ -103,6 +107,7 @@ source_modules = ["librarian.connectors"]
 forbidden_modules = [
     "librarian.storage.database",
     "librarian.storage.sqlite_storage",
+    "librarian.storage.postgres",
     "librarian.storage.vector_store",
     "librarian.storage.fts_store",
     "librarian.indexing",
@@ -117,6 +122,7 @@ source_modules = ["librarian.storage.protocols"]
 forbidden_modules = [
     "librarian.storage.database",
     "librarian.storage.sqlite_storage",
+    "librarian.storage.postgres",
 ]
 # Only direct imports: protocols references the read-side result types
 # (fts_store / vector_store) under TYPE_CHECKING, which transitively reach the
@@ -139,6 +145,14 @@ warn_return_any = true
 warn_unused_ignores = false
 show_error_codes = true
 ignore_missing_imports = true
+
+# psycopg / pgvector are optional (the `postgres` extra) and may be absent in
+# the type-check environment; skip following them so the Postgres backend
+# type-checks with or without the driver installed.
+[[tool.mypy.overrides]]
+module = ["psycopg.*", "pgvector.*", "psycopg_pool.*"]
+ignore_missing_imports = true
+follow_imports = "skip"
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

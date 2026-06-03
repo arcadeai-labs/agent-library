@@ -54,9 +54,7 @@ def _existing_columns(conn: sqlite3.Connection, table: str) -> set[str]:
     return {row[1] for row in cursor.fetchall()}
 
 
-def _add_missing_columns(
-    conn: sqlite3.Connection, table: str, columns: dict[str, str]
-) -> None:
+def _add_missing_columns(conn: sqlite3.Connection, table: str, columns: dict[str, str]) -> None:
     existing = _existing_columns(conn, table)
     for name, col_type in columns.items():
         if name not in existing:
@@ -78,9 +76,7 @@ def _vec_dimension(conn: sqlite3.Connection) -> int:
     """Read the embedding dimension declared on the existing chunk_embeddings table."""
     import re
 
-    row = conn.execute(
-        "SELECT sql FROM sqlite_master WHERE name='chunk_embeddings'"
-    ).fetchone()
+    row = conn.execute("SELECT sql FROM sqlite_master WHERE name='chunk_embeddings'").fetchone()
     if row and row[0]:
         match = re.search(r"float\[(\d+)\]", row[0])
         if match:
@@ -157,8 +153,7 @@ def migrate(conn: sqlite3.Connection) -> None:
     _add_missing_columns(conn, "chunks", _CHUNK_COLUMNS)
 
     conn.execute(
-        "CREATE UNIQUE INDEX IF NOT EXISTS idx_documents_document_id "
-        "ON documents(document_id)"
+        "CREATE UNIQUE INDEX IF NOT EXISTS idx_documents_document_id ON documents(document_id)"
     )
     conn.execute("CREATE INDEX IF NOT EXISTS idx_chunks_chunk_id ON chunks(chunk_id)")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_chunks_deleted_at ON chunks(deleted_at)")

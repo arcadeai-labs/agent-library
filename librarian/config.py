@@ -87,6 +87,23 @@ SOURCES_CONFIG_PATH = os.path.abspath(
 )
 
 # =============================================================================
+# Storage Backend Configuration
+# =============================================================================
+
+# Which storage substrate the Storage bundle resolves to. "sqlite" is the
+# default for OSS / local use (zero external dependencies); "postgres" selects
+# the pgvector-backed PostgresStorage (requires the `postgres` extra).
+STORAGE_BACKEND = os.getenv("STORAGE_BACKEND", "sqlite").strip().lower()
+
+# Postgres connection string (libpq DSN or postgres:// URL). DATABASE_URL is
+# accepted as a fallback so the backend works out of the box on common PaaS.
+POSTGRES_DSN = os.getenv("POSTGRES_DSN") or os.getenv("DATABASE_URL")
+
+# Schema the librarian-owned tables live in. Overridable so test runs (and
+# multi-tenant deployments) can isolate their tables on a shared database.
+POSTGRES_SCHEMA = os.getenv("POSTGRES_SCHEMA", "public").strip()
+
+# =============================================================================
 # Text Embedding Configuration
 # =============================================================================
 

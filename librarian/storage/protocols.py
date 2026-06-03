@@ -27,7 +27,7 @@ from typing import TYPE_CHECKING, Any, Protocol, runtime_checkable
 if TYPE_CHECKING:
     from librarian.storage.fts_store import FTSSearchResult
     from librarian.storage.vector_store import VectorSearchResult
-    from librarian.types import Document
+    from librarian.types import Document, EmbeddingModality
 
 __all__ = [
     "FTSStore",
@@ -73,12 +73,23 @@ class MetadataStore(Protocol):
         end_date: datetime | None = None,
     ) -> "list[Document]": ...
 
+    def get_document_ids_in_timerange(
+        self, start_date: datetime, end_date: datetime
+    ) -> list[int]: ...
+
+    def get_chunk_public_fields(self, chunk_ids: list[int]) -> dict[int, dict[str, Any]]: ...
+
     def get_stats(self) -> dict[str, Any]: ...
 
 
 @runtime_checkable
 class VectorStore(Protocol):
-    """Vector similarity search."""
+    """Vector similarity search.
+
+    Beyond the primary :meth:`search`, the retrieval layer relies on
+    modality-scoped search and single-chunk embedding lookup (for cross-modal
+    queries and MMR diversification), so both backends provide them.
+    """
 
     def search(
         self,
@@ -86,6 +97,20 @@ class VectorStore(Protocol):
         limit: int = 10,
         min_similarity: float = 0.0,
     ) -> "list[VectorSearchResult]": ...
+
+    def search_by_modality(
+        self,
+        query_embedding: list[float],
+        modality: "EmbeddingModality",
+        limit: int = 10,
+        min_similarity: float = 0.0,
+    ) -> "list[VectorSearchResult]": ...
+
+    def get_embedding(
+        self,
+        chunk_id: int,
+        modality: "EmbeddingModality | None" = None,
+    ) -> list[float] | None: ...
 
 
 @runtime_checkable
@@ -118,12 +143,23 @@ class Storage(Protocol):
     * :meth:`migrate` -- create/upgrade librarian-owned tables.
     * :meth:`transaction` -- a context manager yielding a connection/handle on
       which content writes and cursor advances happen atomically.
+
+    The capability stores are read-only members (declared as properties) so a
+    concrete bundle may expose a more specific type for each (e.g. the SQLite
+    backend's ``metadata`` is a ``Database``) and still satisfy the protocol.
     """
 
-    metadata: MetadataStore
-    vectors: VectorStore
-    fts: FTSStore
-    state: StateStore
+    @property
+    def metadata(self) -> MetadataStore: ...
+
+    @property
+    def vectors(self) -> VectorStore: ...
+
+    @property
+    def fts(self) -> FTSStore: ...
+
+    @property
+    def state(self) -> StateStore: ...
 
     def migrate(self) -> None: ...
 

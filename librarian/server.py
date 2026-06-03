@@ -53,6 +53,7 @@ from librarian.sources.ignore import (
     should_skip_file,
 )
 from librarian.storage.database import get_database
+from librarian.storage.factory import get_metadata_store, get_storage
 from librarian.tool_outputs import (
     AddOutput,
     DocumentSummary,
@@ -99,10 +100,8 @@ def _get_searcher() -> HybridSearcher:
 def _process_and_index_file(file_path: Path) -> dict[str, Any]:
     """Process a file and add it to the index via the v0.14 Orchestrator."""
     from librarian.orchestrator import Orchestrator
-    from librarian.storage.sqlite_storage import SQLiteStorage
 
-    storage = SQLiteStorage(database=get_database())
-    storage.migrate()
+    storage = get_storage()
     return Orchestrator(storage=storage).index_file(file_path)
 
 
@@ -278,7 +277,7 @@ async def index_directory_to_library(
         "files": [],
     }
 
-    db = get_database()
+    db = get_metadata_store()
 
     for file_path in all_files:
         try:
@@ -766,7 +765,7 @@ async def search_library(
     if limit is None:
         limit = 10
 
-    db = get_database()
+    db = get_metadata_store()
     filter_doc_ids: list[int] | None = None
 
     # Apply timeframe filter if specified
@@ -928,7 +927,7 @@ async def read_from_library(
     Use this after searching to get the complete content of a
     document, rather than just the matching snippets.
     """
-    db = get_database()
+    db = get_metadata_store()
     doc = db.get_document_by_path(path)
 
     if not doc:
@@ -1075,7 +1074,7 @@ async def list_library_contents(
     Returns a summary of each document including title, path,
     and when it was added/updated.
     """
-    db = get_database()
+    db = get_metadata_store()
     documents = db.list_documents()[:limit]
 
     return [
@@ -1135,7 +1134,7 @@ if ENABLE_OPTIONAL_TOOLS:
                 default_path=DOCUMENTS_PATH,
             )
 
-        db = get_database()
+        db = get_metadata_store()
         docs_by_dir, count_by_prefix = _build_directory_doc_index(db.list_documents())
 
         blocks: list[OverviewSourceBlock] = []
@@ -1238,7 +1237,7 @@ if ENABLE_OPTIONAL_TOOLS:
 
     def _view_stats() -> OverviewResult:
         """Build the STATS view: library totals + active configuration."""
-        stats = get_database().get_stats()
+        stats = get_metadata_store().get_stats()
         return OverviewResult(
             view=LibraryView.STATS.value,
             document_count=stats["document_count"],

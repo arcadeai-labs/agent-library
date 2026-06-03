@@ -175,9 +175,7 @@ class TestSearchTools:
 
         await index_directory_to_library(context=CTX, directory=str(temp_docs_dir))
 
-        results = await search_library(
-            context=CTX, query="test", mode=SearchMode.KEYWORD, limit=5
-        )
+        results = await search_library(context=CTX, query="test", mode=SearchMode.KEYWORD, limit=5)
         assert results, "expected at least one keyword hit for indexed docs"
 
         hit = results[0]

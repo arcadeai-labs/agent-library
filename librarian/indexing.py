@@ -27,13 +27,11 @@ _DEPRECATION_MESSAGE = (
 
 
 def _build_orchestrator() -> Any:
-    """Construct an Orchestrator bound to the current database (v0.14 schema)."""
+    """Construct an Orchestrator bound to the active storage backend (v0.14 schema)."""
     from librarian.orchestrator import Orchestrator
-    from librarian.storage.sqlite_storage import SQLiteStorage
+    from librarian.storage.factory import get_storage
 
-    storage = SQLiteStorage(database=get_database())
-    storage.migrate()
-    return Orchestrator(storage=storage)
+    return Orchestrator(storage=get_storage())
 
 
 class IndexingService:
