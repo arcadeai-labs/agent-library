@@ -11,7 +11,9 @@ multi-modal migration, and brings the database up to the v0.14 shape:
   ``source_created_at``, ``deleted_at``, ``deletion_reason``,
   ``document_source_uri`` and ``chunk_source_uri``.
 * ``chunk_embeddings`` gains a ``model_version`` auxiliary column.
-* a new ``sync_state`` table tracks connector cursors.
+* a ``sync_state`` table tracks connector cursors.
+* a ``source_file_state`` table holds one indexed mtime row per file so the
+  file-mode ingest path advances its cursor in O(1) per file.
 
 The on-disk v0.13 schema is *not* migrated in place: v0.14 detects it on startup
 and asks the user to rebuild (see the detect-and-rebuild flow). This module only
@@ -54,9 +56,7 @@ def _existing_columns(conn: sqlite3.Connection, table: str) -> set[str]:
     return {row[1] for row in cursor.fetchall()}
 
 
-def _add_missing_columns(
-    conn: sqlite3.Connection, table: str, columns: dict[str, str]
-) -> None:
+def _add_missing_columns(conn: sqlite3.Connection, table: str, columns: dict[str, str]) -> None:
     existing = _existing_columns(conn, table)
     for name, col_type in columns.items():
         if name not in existing:
@@ -78,9 +78,7 @@ def _vec_dimension(conn: sqlite3.Connection) -> int:
     """Read the embedding dimension declared on the existing chunk_embeddings table."""
     import re
 
-    row = conn.execute(
-        "SELECT sql FROM sqlite_master WHERE name='chunk_embeddings'"
-    ).fetchone()
+    row = conn.execute("SELECT sql FROM sqlite_master WHERE name='chunk_embeddings'").fetchone()
     if row and row[0]:
         match = re.search(r"float\[(\d+)\]", row[0])
         if match:
@@ -146,6 +144,20 @@ def _create_sync_state(conn: sqlite3.Connection) -> None:
     )
 
 
+def _create_source_file_state(conn: sqlite3.Connection) -> None:
+    """Per-file mtime cursor, one indexed row per (source, path)."""
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS source_file_state (
+            source_key TEXT NOT NULL,
+            path TEXT NOT NULL,
+            mtime REAL,
+            PRIMARY KEY (source_key, path)
+        )
+        """
+    )
+
+
 def migrate(conn: sqlite3.Connection) -> None:
     """Bring ``conn``'s database to the v0.14 schema (idempotent).
 
@@ -157,13 +169,13 @@ def migrate(conn: sqlite3.Connection) -> None:
     _add_missing_columns(conn, "chunks", _CHUNK_COLUMNS)
 
     conn.execute(
-        "CREATE UNIQUE INDEX IF NOT EXISTS idx_documents_document_id "
-        "ON documents(document_id)"
+        "CREATE UNIQUE INDEX IF NOT EXISTS idx_documents_document_id ON documents(document_id)"
     )
     conn.execute("CREATE INDEX IF NOT EXISTS idx_chunks_chunk_id ON chunks(chunk_id)")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_chunks_deleted_at ON chunks(deleted_at)")
 
     _ensure_embeddings_model_version(conn)
     _create_sync_state(conn)
+    _create_source_file_state(conn)
     conn.commit()
     logger.info("v0.14 schema migration complete")

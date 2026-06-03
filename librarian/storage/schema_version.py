@@ -36,9 +36,7 @@ REBUILD_MESSAGE = (
 
 
 def _table_names(conn: sqlite3.Connection) -> set[str]:
-    rows = conn.execute(
-        "SELECT name FROM sqlite_master WHERE type IN ('table', 'view')"
-    ).fetchall()
+    rows = conn.execute("SELECT name FROM sqlite_master WHERE type IN ('table', 'view')").fetchall()
     return {row[0] for row in rows}
 
 
@@ -54,9 +52,7 @@ def _embeddings_has_model_version(conn: sqlite3.Connection) -> bool:
     # chunk_embeddings is a sqlite-vec ``vec0`` virtual table; it cannot be queried
     # without the extension loaded. Detection runs over a plain connection, so we
     # inspect the stored CREATE statement instead of querying the table.
-    row = conn.execute(
-        "SELECT sql FROM sqlite_master WHERE name = 'chunk_embeddings'"
-    ).fetchone()
+    row = conn.execute("SELECT sql FROM sqlite_master WHERE name = 'chunk_embeddings'").fetchone()
     return bool(row and row[0] and "model_version" in row[0])
 
 

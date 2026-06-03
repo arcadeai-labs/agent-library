@@ -79,6 +79,7 @@ def _main(ctx: typer.Context) -> None:
         return
     _guard_schema_or_exit()
 
+
 # Config file path
 CONFIG_DIR = Path.home() / ".librarian"
 SOURCES_FILE = CONFIG_DIR / "sources.json"
@@ -322,9 +323,7 @@ def _guard_schema_or_exit() -> None:
         raise typer.Exit(1)
 
 
-def _reindex_sources(
-    sources: list[dict[str, Any]], verbose: bool = False
-) -> tuple[int, int]:
+def _reindex_sources(sources: list[dict[str, Any]], verbose: bool = False) -> tuple[int, int]:
     """Re-ingest the given sources via the Orchestrator-backed ingest path.
 
     Returns ``(total_indexed, total_errors)``.
@@ -368,13 +367,67 @@ def _reindex_sources(
     return total_indexed, total_errors
 
 
-def _rebuild_v014(*, no_backup: bool = False, verbose: bool = False) -> None:
+def _backup_path_for(db_path: Path) -> Path:
+    """Return a non-colliding backup path for ``db_path``.
+
+    The first rebuild writes ``<db>.v0-backup``. Because that file is the only
+    pre-v0.14 recovery copy, a later rebuild must NOT overwrite it (it would
+    clobber the original v0.13 data with an already-rebuilt copy). When the
+    canonical name is taken, fall back to a timestamped sibling.
+    """
+    canonical = Path(str(db_path) + ".v0-backup")
+    if not canonical.exists():
+        return canonical
+    stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
+    return Path(f"{db_path}.v0-backup-{stamp}")
+
+
+def _confirm_rebuild(db_path: Path, *, no_backup: bool, confirm: bool) -> None:
+    """Gate the destructive rebuild behind an explicit confirmation.
+
+    Raises ``typer.Exit`` if the user declines. ``--yes`` skips the prompt.
+    ``--no-backup`` escalates to a typed confirmation because it is an
+    irreversible, unrecoverable wipe.
+    """
+    if confirm:
+        return
+    if no_backup:
+        rprint(
+            Panel(
+                f"[red]This will permanently delete[/red] [blue]{db_path}[/blue] "
+                "with [red]no backup[/red].\n\n"
+                "[red]This cannot be undone.[/red]",
+                title="[red]Irreversible wipe (--no-backup)[/red]",
+                border_style="red",
+            )
+        )
+        typed = typer.prompt("Type 'rebuild' to confirm", default="", show_default=False)
+        if typed.strip().lower() != "rebuild":
+            rprint("[yellow]Cancelled.[/yellow]")
+            raise typer.Exit(0)
+        return
+    rprint(
+        Panel(
+            f"[yellow]This will wipe and recreate[/yellow] [blue]{db_path}[/blue] "
+            "under the v0.14 schema, then re-ingest configured sources.\n\n"
+            "A backup of the current database is taken first.",
+            title="Rebuild database",
+        )
+    )
+    if not typer.confirm("Continue?"):
+        rprint("[yellow]Cancelled.[/yellow]")
+        raise typer.Exit(0)
+
+
+def _rebuild_v014(*, no_backup: bool = False, verbose: bool = False, confirm: bool = False) -> None:
     """v0.13 -> v0.14 rebuild: back up, wipe, recreate under v0.14, re-ingest.
 
-    This is the one sanctioned remedy for a pre-v0.14 database. It backs up the
-    existing file to ``<db>.v0-backup`` (unless ``no_backup``), deletes and
-    recreates the database under the v0.14 schema, and re-ingests every
-    configured source through ``LocalFileConnector`` + ``Orchestrator``.
+    This is the one sanctioned remedy for a pre-v0.14 database. After an explicit
+    confirmation it backs up the existing file to a non-colliding ``<db>.v0-backup``
+    (unless ``no_backup``), deletes and recreates the database under the v0.14
+    schema, and re-ingests every configured source through ``LocalFileConnector``
+    + ``Orchestrator``. A failed backup aborts before any deletion so data is
+    never lost.
     """
     import shutil
 
@@ -386,8 +439,12 @@ def _rebuild_v014(*, no_backup: bool = False, verbose: bool = False) -> None:
     cfg["ensure_directories"]()
     db_path = Path(cfg["DATABASE_PATH"])
 
+    _confirm_rebuild(db_path, no_backup=no_backup, confirm=confirm)
+
     if db_path.exists() and not no_backup:
-        backup = Path(str(db_path) + ".v0-backup")
+        backup = _backup_path_for(db_path)
+        # copy2 raising here aborts before the unlink() below, so a failed backup
+        # never proceeds to wipe the original database.
         shutil.copy2(db_path, backup)
         rprint(f"[green]Backed up[/green] database to [blue]{backup}[/blue]")
     elif db_path.exists():
@@ -905,6 +962,9 @@ def index_stats(
         bool,
         typer.Option("--no-backup", help="Skip the pre-rebuild database backup."),
     ] = False,
+    confirm: Annotated[
+        bool, typer.Option("--yes", "-y", help="Skip the rebuild confirmation prompt.")
+    ] = False,
     verbose: Annotated[
         bool, typer.Option("--verbose", "-v", help="Show files during rebuild.")
     ] = False,
@@ -917,7 +977,7 @@ def index_stats(
     cfg["ensure_directories"]()
 
     if rebuild:
-        _rebuild_v014(no_backup=no_backup, verbose=verbose)
+        _rebuild_v014(no_backup=no_backup, verbose=verbose, confirm=confirm)
         return
 
     # Stats is a "normal" read; refuse on a pre-v0.14 database (the index group is
@@ -960,6 +1020,12 @@ def index_build(
     """Rebuild the entire index from scratch."""
     cfg = _get_config()
     cfg["ensure_directories"]()
+
+    # The `index` group is exempt from the startup guard so `--rebuild` stays
+    # runnable, but `build` mutates (and the `--source` path deletes a source's
+    # rows) before touching the schema. Refuse on a pre-v0.14 database up front
+    # so we never delete data and then abort mid-migration.
+    _guard_schema_or_exit()
 
     all_sources = _load_sources()
     if not all_sources:

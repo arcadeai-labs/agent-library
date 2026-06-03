@@ -62,6 +62,36 @@ def _upsert(native_id: str, text: str) -> DocumentUpsert:
     )
 
 
+def _multi_upsert(native_id: str, texts: list[str]) -> DocumentUpsert:
+    return DocumentUpsert(
+        source_type="msg",
+        source_native_id=native_id,
+        asset_type=AssetType.TEXT,
+        title=native_id,
+        chunks=[
+            ChunkInput(
+                content=text,
+                chunk_index=i,
+                source_native_id=f"{native_id}#{i}",
+                asset_type=AssetType.TEXT,
+            )
+            for i, text in enumerate(texts)
+        ],
+    )
+
+
+class CountingEmbedder(FakeEmbedder):
+    """FakeEmbedder that records every chunk it is asked to embed."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.embedded: list[str] = []
+
+    def embed_documents(self, documents: list[str]) -> list[list[float]]:
+        self.embedded.extend(documents)
+        return super().embed_documents(documents)
+
+
 @pytest.fixture
 def storage(tmp_path: Path) -> SQLiteStorage:
     db = Database(str(tmp_path / "orch.db"))
@@ -228,7 +258,9 @@ async def test_soft_delete_tombstones_without_removing_rows(storage: SQLiteStora
     await orch.sync(FakeConnector([_upsert("m1", "hello")]))
     assert _count(storage, "chunks") == 1
 
-    delete_event = DocumentSoftDelete(source_type="msg", source_native_id="m1", deletion_reason="gone")
+    delete_event = DocumentSoftDelete(
+        source_type="msg", source_native_id="m1", deletion_reason="gone"
+    )
     await orch.sync(FakeConnector([delete_event]), source_key="fake-del")
 
     # Row is still present, but tombstoned.
@@ -239,6 +271,55 @@ async def test_soft_delete_tombstones_without_removing_rows(storage: SQLiteStora
     ).fetchone()
     assert deleted_at is not None
     assert reason == "gone"
+
+
+async def test_soft_delete_hides_chunk_from_search(storage: SQLiteStorage) -> None:
+    """Tombstoned chunks must drop out of BOTH keyword and semantic search.
+
+    Verifying only the column state (as ``test_soft_delete_tombstones_...`` does)
+    would miss that the read paths must filter ``deleted_at IS NULL`` -- without
+    that filter a soft-deleted chunk stays fully searchable.
+    """
+    embedder = FakeEmbedder()
+    orch = Orchestrator(storage=storage, embedder=embedder)
+    await orch.sync(FakeConnector([_upsert("m1", "hello world")]))
+
+    # Query with the exact vector the chunk was stored under so the semantic hit
+    # is a guaranteed self-match (FakeEmbedder vectors are otherwise unrelated to
+    # the query text), isolating what we are testing: the tombstone filter.
+    query_embedding = embedder.embed_documents(["hello world"])[0]
+
+    # Visible before the delete via both modalities.
+    assert storage.fts.search("hello") != []
+    assert storage.vectors.search(query_embedding) != []
+
+    delete_event = DocumentSoftDelete(
+        source_type="msg", source_native_id="m1", deletion_reason="gone"
+    )
+    await orch.sync(FakeConnector([delete_event]), source_key="fake-del")
+
+    # Gone from both keyword (FTS) and semantic (vector) search.
+    assert storage.fts.search("hello") == []
+    assert storage.vectors.search(query_embedding) == []
+
+
+async def test_reingest_only_reembeds_changed_chunks(storage: SQLiteStorage) -> None:
+    """Editing one chunk of a multi-chunk document re-embeds only that chunk."""
+    embedder = CountingEmbedder()
+    orch = Orchestrator(storage=storage, embedder=embedder)
+
+    await orch.sync(FakeConnector([_multi_upsert("d1", ["alpha", "beta"])]))
+    assert embedder.embedded == ["alpha", "beta"]  # both embedded on first ingest
+
+    embedder.embedded.clear()
+
+    # Re-run from scratch over the same document with one chunk changed.
+    storage.put_sync_state(_reset_state())
+    await orch.sync(FakeConnector([_multi_upsert("d1", ["alpha", "gamma"])]))
+
+    # Only the changed chunk is re-embedded; the unchanged one reuses its vector.
+    assert embedder.embedded == ["gamma"]
+    assert _count(storage, "chunks") == 2
 
 
 def _reset_state():  # type: ignore[no-untyped-def]

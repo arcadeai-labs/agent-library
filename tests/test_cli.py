@@ -203,3 +203,116 @@ def test_search_paths_outputs_complete_long_windows_paths(
 
     assert result.exit_code == 0
     assert result.output == f"{LONG_WINDOWS_PATH}\n"
+
+
+class TestIndexRebuild:
+    """Tests for the destructive ``libr index --rebuild`` remedy.
+
+    Covers the data-safety contract: a backup is taken to ``<db>.v0-backup``;
+    ``--no-backup`` skips it; a failing backup must NOT proceed to delete the
+    original; an existing backup is never clobbered; the wipe yields a v0.14
+    schema; and the wipe is gated behind an explicit confirmation.
+    """
+
+    @staticmethod
+    def _canonical_backup(db_path: Path) -> Path:
+        return Path(str(db_path) + ".v0-backup")
+
+    def test_rebuild_creates_backup_and_recreates_v014(
+        self, clean_db: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from librarian.storage.schema_version import schema_status_for_path
+
+        db_path = clean_db
+        db_path.write_bytes(b"old-db-bytes")
+        monkeypatch.setattr(cli, "SOURCES_FILE", tmp_path / "no_sources.json")
+
+        result = CliRunner().invoke(cli.app, ["index", "--rebuild", "--yes"])
+
+        assert result.exit_code == 0, result.output
+        backup = self._canonical_backup(db_path)
+        assert backup.exists()
+        assert backup.read_bytes() == b"old-db-bytes"  # original bytes preserved
+        assert schema_status_for_path(db_path) == "v0.14"
+
+    def test_rebuild_no_backup_skips_backup(
+        self, clean_db: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from librarian.storage.schema_version import schema_status_for_path
+
+        db_path = clean_db
+        db_path.write_bytes(b"old-db-bytes")
+        monkeypatch.setattr(cli, "SOURCES_FILE", tmp_path / "no_sources.json")
+
+        result = CliRunner().invoke(cli.app, ["index", "--rebuild", "--no-backup", "--yes"])
+
+        assert result.exit_code == 0, result.output
+        assert not self._canonical_backup(db_path).exists()
+        assert schema_status_for_path(db_path) == "v0.14"
+
+    def test_rebuild_aborts_when_backup_fails(
+        self, clean_db: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        import shutil
+
+        db_path = clean_db
+        db_path.write_bytes(b"precious")
+        monkeypatch.setattr(cli, "SOURCES_FILE", tmp_path / "no_sources.json")
+
+        def boom(src: Any, dst: Any) -> None:
+            raise OSError("disk full")
+
+        monkeypatch.setattr(shutil, "copy2", boom)
+
+        result = CliRunner().invoke(cli.app, ["index", "--rebuild", "--yes"])
+
+        assert result.exit_code != 0
+        # A failed backup must never proceed to unlink the original database.
+        assert db_path.exists()
+        assert db_path.read_bytes() == b"precious"
+        assert not self._canonical_backup(db_path).exists()
+
+    def test_rebuild_does_not_clobber_existing_backup(
+        self, clean_db: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        db_path = clean_db
+        db_path.write_bytes(b"current")
+        canonical = self._canonical_backup(db_path)
+        canonical.write_bytes(b"original-v013")
+        monkeypatch.setattr(cli, "SOURCES_FILE", tmp_path / "no_sources.json")
+
+        result = CliRunner().invoke(cli.app, ["index", "--rebuild", "--yes"])
+
+        assert result.exit_code == 0, result.output
+        # The only pre-v0.14 recovery copy survives untouched.
+        assert canonical.read_bytes() == b"original-v013"
+        siblings = list(db_path.parent.glob(db_path.name + ".v0-backup-*"))
+        assert len(siblings) == 1
+        assert siblings[0].read_bytes() == b"current"
+
+    def test_rebuild_aborts_without_confirmation(
+        self, clean_db: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        db_path = clean_db
+        db_path.write_bytes(b"keep")
+        monkeypatch.setattr(cli, "SOURCES_FILE", tmp_path / "no_sources.json")
+
+        result = CliRunner().invoke(cli.app, ["index", "--rebuild"], input="n\n")
+
+        assert result.exit_code == 0
+        assert db_path.read_bytes() == b"keep"  # declined: nothing wiped
+        assert not self._canonical_backup(db_path).exists()
+
+    def test_rebuild_no_backup_requires_typed_confirmation(
+        self, clean_db: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        db_path = clean_db
+        db_path.write_bytes(b"keep")
+        monkeypatch.setattr(cli, "SOURCES_FILE", tmp_path / "no_sources.json")
+
+        result = CliRunner().invoke(
+            cli.app, ["index", "--rebuild", "--no-backup"], input="not-rebuild\n"
+        )
+
+        assert result.exit_code == 0
+        assert db_path.read_bytes() == b"keep"  # wrong phrase: nothing wiped

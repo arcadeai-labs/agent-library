@@ -158,6 +158,7 @@ class VectorStore:
                 JOIN documents d ON c.document_id = d.id
                 WHERE ce.embedding MATCH ?
                     AND k = ?
+                    AND c.deleted_at IS NULL
                 ORDER BY ce.distance ASC
                 """,
                 (query_blob, limit * 2),  # Get extra for filtering
@@ -261,6 +262,7 @@ class VectorStore:
                 JOIN documents d ON c.document_id = d.id
                 WHERE ve.embedding MATCH ?
                     AND k = ?
+                    AND c.deleted_at IS NULL
                 ORDER BY ve.distance ASC
                 """,  # noqa: S608
                 (query_blob, limit * 2),

@@ -151,11 +151,11 @@ class Database:
     @contextmanager
     def _connection(self) -> Generator[sqlite3.Connection, None, None]:
         """
-        Context manager for database connections (private as of v0.14).
+        Context manager for a raw database connection (internal use only).
 
-        The public ``connection()`` accessor was removed in v0.14: external code
-        must go through ``Orchestrator`` / ``Storage`` rather than reaching into
-        raw connections. Kept private for internal store implementations.
+        Private so external code goes through ``Orchestrator`` / ``Storage``
+        instead of issuing raw SQL; only the in-package store implementations
+        use it directly.
 
         Yields:
             A sqlite3 connection with sqlite-vec loaded.
@@ -416,13 +416,13 @@ class Database:
             return None
 
     def get_chunk_public_fields(self, chunk_ids: list[int]) -> dict[int, dict[str, Any]]:
-        """Fetch v0.14 public fields for a set of internal chunk row ids.
+        """Fetch the public chunk fields for a set of internal chunk row ids.
 
         Returns a mapping of ``chunks.id`` -> ``{chunk_id, chunk_index,
-        document_size, source_created_at, chunk_source_uri}``. Used by the MCP
-        layer to enrich search results without threading the new columns through
-        the whole retrieval pipeline (the deterministic-id cutover is tracked
-        separately).
+        document_size, source_created_at, chunk_source_uri}`` for every id that
+        exists; ids with no matching row are omitted. Lets the MCP layer enrich
+        search results with these columns given only the internal row ids the
+        retrieval pipeline returns.
         """
         if not chunk_ids:
             return {}
