@@ -41,7 +41,7 @@ class _TimeoutHandler:
     def __init__(self, seconds: int, model_name: str):
         self.seconds = seconds
         self.model_name = model_name
-        self._old_handler = None
+        self._old_handler: signal.Handlers | None = None
 
     def _handler(self, signum: int, frame: Any) -> None:
         raise ModelLoadTimeoutError(
