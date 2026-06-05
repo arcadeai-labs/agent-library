@@ -606,9 +606,7 @@ async def location_workflow_eval() -> EvalSuite:
         ],
         critics=[
             SimilarityCritic(critic_field="title", weight=0.5),
-            SimilarityCritic(
-                critic_field="content_summary", weight=0.5, similarity_threshold=0.5
-            ),
+            SimilarityCritic(critic_field="content_summary", weight=0.5, similarity_threshold=0.5),
         ],
     )
 
@@ -854,9 +852,7 @@ async def adversarial_eval() -> EvalSuite:
         ],
         critics=[
             # Threshold loosened; phrasing of the query will vary.
-            SimilarityCritic(
-                critic_field="query", weight=1.0, similarity_threshold=0.5
-            ),
+            SimilarityCritic(critic_field="query", weight=1.0, similarity_threshold=0.5),
         ],
     )
 
@@ -1061,15 +1057,9 @@ async def adversarial_eval() -> EvalSuite:
         critics=[
             # The query text will vary ('notes', 'things', 'wrote' etc.) —
             # low weight. The dates carry the signal.
-            SimilarityCritic(
-                critic_field="query", weight=0.2, similarity_threshold=0.3
-            ),
-            DatetimeCritic(
-                critic_field="start_date", weight=0.4, tolerance=timedelta(hours=1)
-            ),
-            DatetimeCritic(
-                critic_field="end_date", weight=0.4, tolerance=timedelta(hours=1)
-            ),
+            SimilarityCritic(critic_field="query", weight=0.2, similarity_threshold=0.3),
+            DatetimeCritic(critic_field="start_date", weight=0.4, tolerance=timedelta(hours=1)),
+            DatetimeCritic(critic_field="end_date", weight=0.4, tolerance=timedelta(hours=1)),
         ],
     )
 
@@ -1101,9 +1091,7 @@ async def adversarial_eval() -> EvalSuite:
             )
         ],
         critics=[
-            SimilarityCritic(
-                critic_field="query", weight=1.0, similarity_threshold=0.5
-            ),
+            SimilarityCritic(critic_field="query", weight=1.0, similarity_threshold=0.5),
         ],
     )
 
@@ -1189,9 +1177,7 @@ async def adversarial_eval() -> EvalSuite:
         ],
         critics=[
             BinaryCritic(critic_field="title", weight=0.6),
-            SimilarityCritic(
-                critic_field="content", weight=0.4, similarity_threshold=0.3
-            ),
+            SimilarityCritic(critic_field="content", weight=0.4, similarity_threshold=0.3),
         ],
     )
 
@@ -1262,16 +1248,14 @@ async def adversarial_eval() -> EvalSuite:
             # 'Replace the contents of that doc' makes intent UNAMBIGUOUSLY an
             # update, not an add. The earlier draft used 'Add a note about ...'
             # which the model reasonably routed to AddToLibrary.
-            "Replace the contents of that doc with: "
-            "'Token rotation policy: 30 day expiry'"
+            "Replace the contents of that doc with: 'Token rotation policy: 30 day expiry'"
         ),
         additional_messages=[
             {"role": "user", "content": "Find docs about JWT in my library"},
             {
                 "role": "assistant",
                 "content": (
-                    "I found 1 doc: /Users/me/notes/work/JWT_Best_Practices.md "
-                    "(score 0.94)."
+                    "I found 1 doc: /Users/me/notes/work/JWT_Best_Practices.md (score 0.94)."
                 ),
             },
         ],
@@ -1286,9 +1270,7 @@ async def adversarial_eval() -> EvalSuite:
         ],
         critics=[
             BinaryCritic(critic_field="path", weight=0.6),
-            SimilarityCritic(
-                critic_field="content", weight=0.4, similarity_threshold=0.5
-            ),
+            SimilarityCritic(critic_field="content", weight=0.4, similarity_threshold=0.5),
         ],
     )
 
