@@ -15,12 +15,12 @@ from typing import TYPE_CHECKING, Any, Union
 
 import numpy as np
 
+from librarian.config import EMBEDDING_DIMENSION, EMBEDDING_MODEL
+from librarian.processing.embed.base import EmbeddingProvider
+
 # Timeout for model loading (seconds). Prevents indefinite hangs if model
 # download stalls or disk I/O is slow. Set to 0 to disable.
 MODEL_LOAD_TIMEOUT = 120
-
-from librarian.config import EMBEDDING_DIMENSION, EMBEDDING_MODEL
-from librarian.processing.embed.base import EmbeddingProvider
 
 if TYPE_CHECKING:
     from PIL.Image import Image as PILImage
