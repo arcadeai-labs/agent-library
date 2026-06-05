@@ -275,12 +275,19 @@ class LocalEmbeddingProvider(EmbeddingProvider):
             else:
                 os.environ["TQDM_DISABLE"] = old_tqdm_disable
 
-        self._dimension = self._model.get_sentence_embedding_dimension()
-        logger.info(
-            "Loaded model %s with dimension %d",
-            self._model_name,
-            self._dimension,
-        )
+        # Some models (e.g., CLIP) return None for get_sentence_embedding_dimension()
+        raw_dim = self._model.get_sentence_embedding_dimension()
+        if raw_dim is not None:
+            self._dimension = raw_dim
+            logger.info("Loaded model %s with dimension %d", self._model_name, self._dimension)
+        else:
+            # Fall back to config default or infer from a test embedding
+            self._dimension = EMBEDDING_DIMENSION
+            logger.info(
+                "Loaded model %s (dimension not reported, using default %d)",
+                self._model_name,
+                self._dimension,
+            )
 
     @property
     def dimension(self) -> int:
