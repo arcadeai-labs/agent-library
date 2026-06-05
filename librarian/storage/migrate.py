@@ -11,7 +11,9 @@ multi-modal migration, and brings the database up to the v0.14 shape:
   ``source_created_at``, ``deleted_at``, ``deletion_reason``,
   ``document_source_uri`` and ``chunk_source_uri``.
 * ``chunk_embeddings`` gains a ``model_version`` auxiliary column.
-* a new ``sync_state`` table tracks connector cursors.
+* a ``sync_state`` table tracks connector cursors.
+* a ``source_file_state`` table holds one indexed mtime row per file so the
+  file-mode ingest path advances its cursor in O(1) per file.
 
 The on-disk v0.13 schema is *not* migrated in place: v0.14 detects it on startup
 and asks the user to rebuild (see the detect-and-rebuild flow). This module only
@@ -142,6 +144,20 @@ def _create_sync_state(conn: sqlite3.Connection) -> None:
     )
 
 
+def _create_source_file_state(conn: sqlite3.Connection) -> None:
+    """Per-file mtime cursor, one indexed row per (source, path)."""
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS source_file_state (
+            source_key TEXT NOT NULL,
+            path TEXT NOT NULL,
+            mtime REAL,
+            PRIMARY KEY (source_key, path)
+        )
+        """
+    )
+
+
 def migrate(conn: sqlite3.Connection) -> None:
     """Bring ``conn``'s database to the v0.14 schema (idempotent).
 
@@ -160,5 +176,6 @@ def migrate(conn: sqlite3.Connection) -> None:
 
     _ensure_embeddings_model_version(conn)
     _create_sync_state(conn)
+    _create_source_file_state(conn)
     conn.commit()
     logger.info("v0.14 schema migration complete")

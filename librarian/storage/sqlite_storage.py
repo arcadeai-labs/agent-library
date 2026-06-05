@@ -27,6 +27,7 @@ from datetime import datetime
 from librarian.storage.database import (
     Database,
     _json_default,
+    deserialize_embedding,
     get_database,
     serialize_embedding,
 )
@@ -157,9 +158,68 @@ class SQLiteStorage:
         if own:
             conn.commit()
 
+    def get_file_mtime(self, source_key: str, path: str) -> float | None:
+        """Return the last-recorded mtime for a single file, or ``None``."""
+        conn = self._db._get_connection()
+        row = conn.execute(
+            "SELECT mtime FROM source_file_state WHERE source_key = ? AND path = ?",
+            (source_key, path),
+        ).fetchone()
+        return row["mtime"] if row is not None else None
+
+    def set_file_mtime(
+        self,
+        source_key: str,
+        path: str,
+        mtime: float,
+        conn: sqlite3.Connection | None = None,
+    ) -> None:
+        """Upsert one file's mtime as a single indexed row (O(1), no full rewrite).
+
+        When ``conn`` is provided the write joins the caller's transaction so the
+        per-file cursor advances atomically with the content it describes.
+        """
+        own = conn is None
+        conn = conn or self._db._get_connection()
+        conn.execute(
+            """
+            INSERT INTO source_file_state (source_key, path, mtime)
+            VALUES (?, ?, ?)
+            ON CONFLICT(source_key, path) DO UPDATE SET mtime = excluded.mtime
+            """,
+            (source_key, path, mtime),
+        )
+        if own:
+            conn.commit()
+
     # =========================================================================
     # Write paths
     # =========================================================================
+
+    def existing_text_chunks(self, document_id: str) -> dict[str, tuple[str, list[float] | None]]:
+        """Return the document's live chunks as ``chunk_id -> (content, text_embedding)``.
+
+        Only non-deleted chunks are included; the embedding is the stored
+        TEXT-modality vector, or ``None`` when the chunk has no text embedding.
+        CODE/VISION embeddings are not returned.
+        """
+        conn = self._db._get_connection()
+        rows = conn.execute(
+            """
+            SELECT c.chunk_id, c.content, ce.embedding AS embedding
+            FROM chunks c
+            LEFT JOIN chunk_embeddings ce ON ce.chunk_id = c.id
+            WHERE c.document_id = (SELECT id FROM documents WHERE document_id = ?)
+              AND c.deleted_at IS NULL
+              AND c.chunk_id IS NOT NULL
+            """,
+            (document_id,),
+        ).fetchall()
+        result: dict[str, tuple[str, list[float] | None]] = {}
+        for row in rows:
+            embedding = deserialize_embedding(row["embedding"]) if row["embedding"] else None
+            result[row["chunk_id"]] = (row["content"], embedding)
+        return result
 
     def write_upsert(self, conn: sqlite3.Connection, prepared: PreparedDocument) -> None:
         """Create-or-replace a document and all its chunks within ``conn``'s txn."""

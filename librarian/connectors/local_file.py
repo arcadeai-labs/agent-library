@@ -126,6 +126,12 @@ class LocalFileConnector(Connector):
                 track_matcher = LibrarianTrackMatcher(base)
                 pattern = "**/*" if self._recursive else "*"
                 for p in base.glob(pattern):
+                    # Skip symlinks: glob does not recurse into symlinked dirs but
+                    # does yield symlinked files, and is_file() follows them. A
+                    # symlink whose target lives outside the source root would
+                    # otherwise be read into the searchable corpus.
+                    if p.is_symlink():
+                        continue
                     if p.is_file() and not self._skip(p, gitignore_matcher, track_matcher):
                         files.append(p)
         # Deterministic order makes cursors and tests stable.
@@ -155,7 +161,12 @@ class LocalFileConnector(Connector):
 
         Exposed so the orchestrator's single-file shim can reuse the exact same
         parser-registry routing and inline-text decisions as the streaming path.
+
+        The path is canonicalized so the deterministic id derived from
+        ``source_native_id`` is identical regardless of whether the caller passed
+        a relative, symlinked, or ``..``-laden spelling of the same file.
         """
+        path = path.resolve()
         parser, asset_type = self._registry.get_parser(path)
         if parser is None:
             return None

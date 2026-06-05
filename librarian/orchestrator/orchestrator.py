@@ -67,7 +67,7 @@ class Orchestrator:
         storage: "Storage | None" = None,
         embedder: Any = None,
     ) -> None:
-        self.storage = storage or get_storage()
+        self.storage: Storage = storage or get_storage()
         self._embedder = embedder
         self._text_chunker = Chunker(strategy=ChunkingStrategy.HEADERS)
         self._code_chunker = CodeChunker()
@@ -89,7 +89,7 @@ class Orchestrator:
             A :class:`SyncResult` with counts and the final cursor.
         """
         source_key = source_key or connector.name
-        existing = self.storage.get_sync_state(source_key)
+        existing = self.storage.state.get_sync_state(source_key)
         cursor: dict[str, Any] = existing.cursor if existing else connector.initial_state()
         documents_seen = existing.documents_seen if existing else 0
         chunks_total = existing.chunks_written if existing else 0
@@ -104,7 +104,7 @@ class Orchestrator:
                 chunks_total += len(prepared.chunks)
                 with self.storage.transaction() as conn:
                     self.storage.write_upsert(conn, prepared)
-                    self.storage.put_sync_state(
+                    self.storage.state.put_sync_state(
                         SyncState(
                             source_key=source_key,
                             cursor=next_cursor,
@@ -125,7 +125,7 @@ class Orchestrator:
                 next_cursor = event.checkpoint if event.checkpoint is not None else cursor
                 with self.storage.transaction() as conn:
                     self.storage.soft_delete_document(conn, doc_id, event.deletion_reason)
-                    self.storage.put_sync_state(
+                    self.storage.state.put_sync_state(
                         SyncState(
                             source_key=source_key,
                             cursor=next_cursor,
@@ -154,17 +154,20 @@ class Orchestrator:
         """Index a single file synchronously (the file-mode driver).
 
         This is the synchronous entrypoint the ``IndexingService`` shim and the
-        CLI/MCP file-ingest path use. It reproduces the old
-        ``IndexingService.index_file`` surface (``{path, title, chunks, status}``
-        plus a ``reason`` when skipped) while writing through the v0.14 storage
-        path: deterministic ids, new columns, and a merged ``local_file`` cursor
-        in ``sync_state``.
+        CLI/MCP file-ingest path use. It returns ``{path, title, chunks, status}``
+        (plus a ``reason`` when skipped) and writes through the v0.14 storage
+        path: deterministic ids, new columns, and a per-file mtime cursor.
+
+        The path is resolved to its canonical absolute form before hashing so the
+        deterministic ``document_id`` matches the streaming connector path and a
+        relative/symlinked spelling of the same file never produces a second
+        ``documents`` row.
 
         Raises:
             FileReadTimeoutError: If ``stat()`` times out (cloud storage not synced).
             FileReadError: For other I/O errors accessing the file.
         """
-        file_path = Path(file_path)
+        file_path = Path(file_path).resolve()
         try:
             mtime = file_path.stat().st_mtime
         except TimeoutError as e:
@@ -191,16 +194,10 @@ class Orchestrator:
 
         with self.storage.transaction() as conn:
             self.storage.write_upsert(conn, prepared)
-            state = self.storage.get_sync_state(source_key) or SyncState(
-                source_key=source_key, cursor={"mtimes": {}}
-            )
-            state.cursor.setdefault("mtimes", {})[str(file_path)] = mtime
-            state.status = "ok"
-            state.last_success_at = datetime.now()
-            state.last_attempt_at = datetime.now()
-            state.documents_seen += 1
-            state.chunks_written += len(prepared.chunks)
-            self.storage.put_sync_state(state, conn=conn)
+            # Record this file's mtime as a single indexed row (O(1)) rather than
+            # rewriting a growing JSON map on every file (which was O(N^2)).
+            self.storage.state.set_file_mtime(source_key, str(file_path), mtime, conn=conn)
+            self._bump_sync_stats(source_key, len(prepared.chunks), conn=conn)
 
         return {
             "path": str(file_path),
@@ -208,6 +205,16 @@ class Orchestrator:
             "chunks": len(prepared.chunks),
             "status": status,
         }
+
+    def _bump_sync_stats(self, source_key: str, chunks_written: int, *, conn: Any) -> None:
+        """Advance lightweight run stats for the file-mode source within ``conn``."""
+        state = self.storage.state.get_sync_state(source_key) or SyncState(source_key=source_key)
+        state.status = "ok"
+        state.last_success_at = datetime.now()
+        state.last_attempt_at = datetime.now()
+        state.documents_seen += 1
+        state.chunks_written += chunks_written
+        self.storage.state.put_sync_state(state, conn=conn)
 
     # =========================================================================
     # Prepare (slow work, no DB writes)
@@ -227,11 +234,17 @@ class Orchestrator:
             content = parsed.content
             title = event.title if event.title is not None else parsed.title
 
-        modality, embeddings, model_version = self._embed(event, text_chunks, asset_type)
+        chunk_ids = [
+            ids.chunk_id(connector.name, event.source_type, native_ids[i])
+            for i in range(len(text_chunks))
+        ]
+        modality, embeddings, model_version = self._embed(
+            event, text_chunks, asset_type, chunk_ids, document_id
+        )
 
         prepared_chunks = [
             PreparedChunk(
-                chunk_id=ids.chunk_id(connector.name, event.source_type, native_ids[i]),
+                chunk_id=chunk_ids[i],
                 content=chunk.content,
                 chunk_index=i,
                 start_char=chunk.start_char,
@@ -366,6 +379,8 @@ class Orchestrator:
         event: DocumentUpsert,
         chunks: list[TextChunk],
         asset_type: AssetType,
+        chunk_ids: list[str],
+        document_id: str,
     ) -> tuple[EmbeddingModality, list[list[float]], str]:
         modality = self._determine_modality(asset_type)
         embedder = self._embedder or get_embedder_for_modality(modality)
@@ -380,10 +395,60 @@ class Orchestrator:
         ):
             embeddings = self._embed_image_chunks(Path(event.source_native_id), chunks, embedder)
         else:
-            embeddings = embedder.embed_documents([c.content for c in chunks])
+            embeddings = self._embed_text_reusing_unchanged(
+                chunks, chunk_ids, document_id, modality, embedder
+            )
 
         model_version = getattr(embedder, "model_name", "unknown")
         return modality, embeddings, model_version
+
+    def _embed_text_reusing_unchanged(
+        self,
+        chunks: list[TextChunk],
+        chunk_ids: list[str],
+        document_id: str,
+        modality: EmbeddingModality,
+        embedder: Any,
+    ) -> list[list[float]]:
+        """Embed chunks, reusing the stored embedding for any unchanged chunk.
+
+        A chunk is "unchanged" when its deterministic id already exists for this
+        document with identical content and a stored TEXT embedding of the
+        expected dimension. Editing one chunk of a large document then only
+        re-embeds that chunk instead of the whole document (embedding is the
+        dominant ingest cost). Reuse applies to the TEXT modality only; CODE and
+        VISION always re-embed.
+        """
+        contents = [c.content for c in chunks]
+        if modality != EmbeddingModality.TEXT:
+            all_fresh: list[list[float]] = embedder.embed_documents(contents)
+            return all_fresh
+
+        from librarian.storage.database import get_effective_embedding_dimension
+
+        expected_dim = get_effective_embedding_dimension()
+        existing = self.storage.existing_text_chunks(document_id)
+
+        reused: list[list[float] | None] = [None] * len(chunks)
+        to_embed: list[int] = []
+        for i, cid in enumerate(chunk_ids):
+            prev = existing.get(cid)
+            if (
+                prev is not None
+                and prev[0] == contents[i]
+                and prev[1] is not None
+                and len(prev[1]) == expected_dim
+            ):
+                reused[i] = prev[1]
+            else:
+                to_embed.append(i)
+
+        if to_embed:
+            fresh: list[list[float]] = embedder.embed_documents([contents[i] for i in to_embed])
+            for j, i in enumerate(to_embed):
+                reused[i] = fresh[j]
+
+        return [emb for emb in reused if emb is not None]
 
     def _load_image(self, file_path: Path) -> "PILImage | None":  # type: ignore[no-any-unimported]
         try:

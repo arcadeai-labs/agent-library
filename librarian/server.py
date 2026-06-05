@@ -202,7 +202,9 @@ async def index_directory_to_library(
     Recursively indexes all supported file types. Files that haven't
     changed since last indexing are automatically skipped.
     """
-    dir_path = Path(directory) if directory else Path(DOCUMENTS_PATH)
+    # Resolve up front so discovered file paths are canonical and match the
+    # resolved id/path the orchestrator writes (keeps change-detection stable).
+    dir_path = (Path(directory) if directory else Path(DOCUMENTS_PATH)).resolve()
 
     if not dir_path.exists():
         raise RetryableToolError(
@@ -233,15 +235,14 @@ async def index_directory_to_library(
     track_matcher = LibrarianTrackMatcher(dir_path)
     forced_paths = normalize_force_include(force_include)
 
-    all_files: list[Path] = []
-    for ext in supported_extensions:
-        pattern = f"**/*{ext}"
-        all_files.extend(dir_path.glob(pattern))
-
+    # Walk the tree once and filter inline. Globbing once per supported
+    # extension would re-walk the whole directory ~20-25x.
     all_files = [
         f
-        for f in all_files
-        if not _should_skip_file(
+        for f in dir_path.glob("**/*")
+        if not f.is_symlink()
+        and f.is_file()
+        and not _should_skip_file(
             f,
             supported_extensions,
             gitignore_matcher,
@@ -279,6 +280,16 @@ async def index_directory_to_library(
 
     db = get_metadata_store()
 
+    # Build storage + orchestrator once for the whole run. Constructing them per
+    # file would re-run migrate() (schema introspection + index/DDL + commit) on
+    # every iteration, defeating the migrate-once singleton.
+    from librarian.orchestrator import Orchestrator
+    from librarian.storage.sqlite_storage import SQLiteStorage
+
+    storage = SQLiteStorage(database=db)
+    storage.migrate()
+    orchestrator = Orchestrator(storage=storage)
+
     for file_path in all_files:
         try:
             # Check if document exists and compare modification times
@@ -310,7 +321,7 @@ async def index_directory_to_library(
                     results["skipped"] += 1
                     continue
 
-            result = _process_and_index_file(file_path)
+            result = orchestrator.index_file(file_path)
             results["files"].append(result)  # type: ignore[arg-type]
 
             if result["status"] == "created":

@@ -18,7 +18,6 @@ These are structural ``typing.Protocol`` definitions, so any object with the
 right methods satisfies them -- no explicit subclassing required.
 """
 
-from collections.abc import Iterator
 from contextlib import AbstractContextManager
 from dataclasses import dataclass, field
 from datetime import datetime
@@ -27,6 +26,7 @@ from typing import TYPE_CHECKING, Any, Protocol, runtime_checkable
 if TYPE_CHECKING:
     from librarian.storage.fts_store import FTSSearchResult
     from librarian.storage.vector_store import VectorSearchResult
+    from librarian.storage.write_models import PreparedDocument
     from librarian.types import Document, EmbeddingModality
 
 __all__ = [
@@ -35,8 +35,16 @@ __all__ = [
     "StateStore",
     "Storage",
     "SyncState",
+    "TxnHandle",
     "VectorStore",
 ]
+
+# An opaque handle to an open storage transaction. Concrete backends bind it to
+# whatever their ``transaction()`` yields (a ``sqlite3.Connection`` today, an
+# async session for a future Postgres backend). Callers never inspect it; they
+# only pass it back into the write methods so a content write and its cursor
+# advance land in the same transaction.
+TxnHandle = Any
 
 
 @dataclass
@@ -131,7 +139,13 @@ class StateStore(Protocol):
 
     def get_sync_state(self, source_key: str) -> SyncState | None: ...
 
-    def put_sync_state(self, state: SyncState, conn: Any = None) -> None: ...
+    def put_sync_state(self, state: SyncState, conn: "TxnHandle | None" = None) -> None: ...
+
+    def get_file_mtime(self, source_key: str, path: str) -> float | None: ...
+
+    def set_file_mtime(
+        self, source_key: str, path: str, mtime: float, conn: "TxnHandle | None" = None
+    ) -> None: ...
 
 
 @runtime_checkable
@@ -141,14 +155,18 @@ class Storage(Protocol):
     Bundles the four capability protocols and adds:
 
     * :meth:`migrate` -- create/upgrade librarian-owned tables.
-    * :meth:`transaction` -- a context manager yielding a connection/handle on
-      which content writes and cursor advances happen atomically.
+    * :meth:`transaction` -- a context manager yielding a handle on which
+      content writes and cursor advances happen atomically.
+    * :meth:`write_upsert` / :meth:`soft_delete_document` -- the document write
+      paths the orchestrator drives inside that transaction.
 
-    The capability stores are read-only members (declared as properties) so a
-    concrete bundle may expose a more specific type for each (e.g. the SQLite
-    backend's ``metadata`` is a ``Database``) and still satisfy the protocol.
+    Sync-cursor persistence lives on the composed :attr:`state` store rather
+    than being duplicated here, so callers reach it via ``storage.state``.
     """
 
+    # Read-only properties (rather than bare attributes) so a concrete backend
+    # whose stores are subtypes of these protocols still satisfies the bundle:
+    # mutable protocol attributes are invariant, properties are covariant.
     @property
     def metadata(self) -> MetadataStore: ...
 
@@ -163,16 +181,14 @@ class Storage(Protocol):
 
     def migrate(self) -> None: ...
 
-    def transaction(self) -> AbstractContextManager[Any]: ...
+    def transaction(self) -> AbstractContextManager["TxnHandle"]: ...
 
-    def get_sync_state(self, source_key: str) -> SyncState | None: ...
+    def existing_text_chunks(
+        self, document_id: str
+    ) -> "dict[str, tuple[str, list[float] | None]]": ...
 
-    def put_sync_state(self, state: SyncState, conn: Any = None) -> None: ...
+    def write_upsert(self, conn: "TxnHandle", prepared: "PreparedDocument") -> None: ...
 
-    def write_upsert(self, conn: Any, prepared: Any) -> None: ...
-
-    def soft_delete_document(self, conn: Any, document_id: str, reason: str | None) -> int: ...
-
-
-# Re-export Iterator for implementers that annotate transaction() precisely.
-_ = Iterator
+    def soft_delete_document(
+        self, conn: "TxnHandle", document_id: str, reason: str | None
+    ) -> int: ...

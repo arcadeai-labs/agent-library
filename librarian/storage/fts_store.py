@@ -85,6 +85,7 @@ class FTSStore:
                 JOIN chunks c ON chunks_fts.rowid = c.id
                 JOIN documents d ON c.document_id = d.id
                 WHERE chunks_fts MATCH ?
+                    AND c.deleted_at IS NULL
                 ORDER BY rank
                 LIMIT ?
                 """,
@@ -143,6 +144,7 @@ class FTSStore:
                 JOIN documents d ON c.document_id = d.id
                 WHERE chunks_fts MATCH ?
                     AND c.document_id = ?
+                    AND c.deleted_at IS NULL
                 ORDER BY rank
                 LIMIT ?
                 """,
