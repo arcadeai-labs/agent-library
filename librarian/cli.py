@@ -367,21 +367,6 @@ def _reindex_sources(sources: list[dict[str, Any]], verbose: bool = False) -> tu
     return total_indexed, total_errors
 
 
-def _backup_path_for(db_path: Path) -> Path:
-    """Return a non-colliding backup path for ``db_path``.
-
-    The first rebuild writes ``<db>.v0-backup``. Because that file is the only
-    pre-v0.14 recovery copy, a later rebuild must NOT overwrite it (it would
-    clobber the original v0.13 data with an already-rebuilt copy). When the
-    canonical name is taken, fall back to a timestamped sibling.
-    """
-    canonical = Path(str(db_path) + ".v0-backup")
-    if not canonical.exists():
-        return canonical
-    stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
-    return Path(f"{db_path}.v0-backup-{stamp}")
-
-
 def _confirm_rebuild(db_path: Path, *, no_backup: bool, confirm: bool) -> None:
     """Gate the destructive rebuild behind an explicit confirmation.
 
@@ -420,20 +405,15 @@ def _confirm_rebuild(db_path: Path, *, no_backup: bool, confirm: bool) -> None:
 
 
 def _rebuild_v014(*, no_backup: bool = False, verbose: bool = False, confirm: bool = False) -> None:
-    """v0.13 -> v0.14 rebuild: back up, wipe, recreate under v0.14, re-ingest.
+    """Interactive v0.13 -> v0.14 rebuild remedy.
 
-    This is the one sanctioned remedy for a pre-v0.14 database. After an explicit
-    confirmation it backs up the existing file to a non-colliding ``<db>.v0-backup``
-    (unless ``no_backup``), deletes and recreates the database under the v0.14
-    schema, and re-ingests every configured source through ``LocalFileConnector``
-    + ``Orchestrator``. A failed backup aborts before any deletion so data is
-    never lost.
+    Confirms with the user, backs up the existing database (unless ``no_backup``),
+    wipes and recreates it under the current schema, then re-ingests every
+    configured source. The backup/wipe mechanics live in
+    :mod:`librarian.storage.rebuild`; this function only owns the prompts and the
+    source re-ingestion.
     """
-    import shutil
-
-    from librarian.storage import database as db_module
-    from librarian.storage.database import get_database
-    from librarian.storage.sqlite_storage import SQLiteStorage
+    from librarian.storage import rebuild
 
     cfg = _get_config()
     cfg["ensure_directories"]()
@@ -442,20 +422,13 @@ def _rebuild_v014(*, no_backup: bool = False, verbose: bool = False, confirm: bo
     _confirm_rebuild(db_path, no_backup=no_backup, confirm=confirm)
 
     if db_path.exists() and not no_backup:
-        backup = _backup_path_for(db_path)
-        # copy2 raising here aborts before the unlink() below, so a failed backup
-        # never proceeds to wipe the original database.
-        shutil.copy2(db_path, backup)
+        # backup_database raises before any wipe, so a failed backup never loses data.
+        backup = rebuild.backup_database(db_path)
         rprint(f"[green]Backed up[/green] database to [blue]{backup}[/blue]")
     elif db_path.exists():
         rprint("[yellow]Skipping backup[/yellow] (--no-backup).")
 
-    # Wipe and recreate cleanly under the v0.14 schema.
-    db_module._db_instance = None
-    if db_path.exists():
-        db_path.unlink()
-    storage = SQLiteStorage(database=get_database())
-    storage.migrate()
+    rebuild.recreate_empty(db_path)
     rprint("[cyan]Recreated the database under the v0.14 schema.[/cyan]")
 
     sources = _load_sources()

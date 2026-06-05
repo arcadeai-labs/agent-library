@@ -197,13 +197,11 @@ class SQLiteStorage:
     # =========================================================================
 
     def existing_text_chunks(self, document_id: str) -> dict[str, tuple[str, list[float] | None]]:
-        """Map a document's live chunk ids to ``(content, text_embedding)``.
+        """Return the document's live chunks as ``chunk_id -> (content, text_embedding)``.
 
-        Lets the orchestrator diff incoming chunks against what is already stored
-        and reuse the embedding for any chunk whose content is unchanged, so a
-        small edit to a large document does not re-embed every chunk. Only the
-        TEXT-modality embedding is returned (the dominant ingest cost); other
-        modalities fall back to re-embedding.
+        Only non-deleted chunks are included; the embedding is the stored
+        TEXT-modality vector, or ``None`` when the chunk has no text embedding.
+        CODE/VISION embeddings are not returned.
         """
         conn = self._db._get_connection()
         rows = conn.execute(
