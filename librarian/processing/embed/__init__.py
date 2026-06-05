@@ -34,7 +34,7 @@ from librarian.config import (
     VISION_EMBEDDING_MODEL,
 )
 from librarian.processing.embed.base import EmbeddingProvider
-from librarian.processing.embed.local import LocalEmbeddingProvider
+from librarian.processing.embed.local import LocalEmbeddingProvider, ModelLoadTimeoutError
 from librarian.processing.embed.openai import OpenAIEmbeddingProvider
 from librarian.types import EmbeddingModality
 
@@ -45,6 +45,7 @@ __all__ = [
     "EmbeddingProvider",
     "EmbeddingRegistry",
     "LocalEmbeddingProvider",
+    "ModelLoadTimeoutError",
     "OpenAIEmbeddingProvider",
     "get_embedder",
     "get_embedder_for_modality",

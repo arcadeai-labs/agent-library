@@ -896,11 +896,14 @@ async def search_library(
             )
     except Exception as e:
         logger.exception("search_library failed (mode=%s)", mode.value)
+        # Include actual error details for better diagnostics
+        error_type = type(e).__name__
+        error_detail = str(e)[:200] if str(e) else "no details"
         raise RetryableToolError(
-            message=f"The {mode.value} search backend isn't responding.",
+            message=f"Search failed ({mode.value} mode): {error_type}: {error_detail}",
             additional_prompt_content=(
                 "Try again with mode='keyword'. That uses plain full-text search "
-                "and doesn't depend on the embedding service. "
+                "and doesn't depend on the embedding model. "
                 "If keyword mode also fails, call get_library_overview(view='stats') — the index "
                 "may be empty (in which case ask the user to add content first)."
             ),
