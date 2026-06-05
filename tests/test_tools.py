@@ -166,6 +166,29 @@ class TestSearchTools:
         assert isinstance(results, list)
 
     @pytest.mark.asyncio
+    async def test_search_library_returns_v014_shape(
+        self, temp_docs_dir: Path, clean_db: Path
+    ) -> None:
+        """Search hits expose the v0.14 shape: str chunk_id + additive fields."""
+        from librarian.server import index_directory_to_library, search_library
+        from librarian.types import SearchMode
+
+        await index_directory_to_library(context=CTX, directory=str(temp_docs_dir))
+
+        results = await search_library(context=CTX, query="test", mode=SearchMode.KEYWORD, limit=5)
+        assert results, "expected at least one keyword hit for indexed docs"
+
+        hit = results[0]
+        # chunk_id is the deterministic hash rendered as a hex string, not an int.
+        assert isinstance(hit["chunk_id"], str)
+        assert len(hit["chunk_id"]) == 64  # sha256 hexdigest
+        # Additive v0.14 fields are present and populated for freshly ingested rows.
+        assert "chunk_source_uri" in hit
+        assert hit["chunk_source_uri"] and hit["chunk_source_uri"].startswith("file://")
+        assert isinstance(hit["chunk_index"], int)
+        assert isinstance(hit["document_size"], int)
+
+    @pytest.mark.asyncio
     async def test_search_library_semantic(self, temp_docs_dir: Path, clean_db: Path) -> None:
         """Test semantic search mode."""
         from librarian.server import index_directory_to_library, search_library

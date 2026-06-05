@@ -92,7 +92,7 @@ class UpdateOutput(TypedDict):
 
 
 class SearchHit(TypedDict):
-    chunk_id: int
+    chunk_id: str  # deterministic hash (v0.14); falls back to the surrogate id as str
     document_id: int
     document_path: str
     content: str
@@ -100,6 +100,10 @@ class SearchHit(TypedDict):
     score: float
     snippet: str | None
     asset_type: str
+    chunk_source_uri: str | None
+    chunk_index: int | None
+    document_size: int | None
+    source_created_at: str | None
 
 
 class _ReadOutputRequired(TypedDict):

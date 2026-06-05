@@ -66,8 +66,12 @@ format-check: ## Check code formatting
 typecheck: ## Run type checking with mypy
 	@uv run mypy librarian
 
+.PHONY: lint-imports
+lint-imports: ## Enforce module boundaries with import-linter
+	@uv run lint-imports
+
 .PHONY: check
-check: lint format-check typecheck ## Run all code quality checks
+check: lint format-check typecheck lint-imports ## Run all code quality checks
 
 .PHONY: pre-commit
 pre-commit: ## Run pre-commit hooks on all files

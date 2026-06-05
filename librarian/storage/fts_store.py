@@ -69,7 +69,7 @@ class FTSStore:
         # Users can still use FTS5 syntax by quoting terms
         safe_query = self._prepare_query(query)
 
-        with self.db.connection() as conn:
+        with self.db._connection() as conn:
             rows = conn.execute(
                 """
                 SELECT
@@ -85,6 +85,7 @@ class FTSStore:
                 JOIN chunks c ON chunks_fts.rowid = c.id
                 JOIN documents d ON c.document_id = d.id
                 WHERE chunks_fts MATCH ?
+                    AND c.deleted_at IS NULL
                 ORDER BY rank
                 LIMIT ?
                 """,
@@ -127,7 +128,7 @@ class FTSStore:
 
         safe_query = self._prepare_query(query)
 
-        with self.db.connection() as conn:
+        with self.db._connection() as conn:
             rows = conn.execute(
                 """
                 SELECT
@@ -143,6 +144,7 @@ class FTSStore:
                 JOIN documents d ON c.document_id = d.id
                 WHERE chunks_fts MATCH ?
                     AND c.document_id = ?
+                    AND c.deleted_at IS NULL
                 ORDER BY rank
                 LIMIT ?
                 """,
@@ -222,7 +224,7 @@ class FTSStore:
         """
         safe_query = self._prepare_query(query)
 
-        with self.db.connection() as conn:
+        with self.db._connection() as conn:
             row = conn.execute(
                 """
                 SELECT highlight(chunks_fts, 0, ?, ?) as highlighted

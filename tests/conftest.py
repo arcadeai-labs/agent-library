@@ -196,6 +196,10 @@ def clean_db(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Generator[Path,
 
     db_path = tmp_path / "test.db"
     monkeypatch.setattr(config_module, "DATABASE_PATH", str(db_path))
+    # database.py binds DATABASE_PATH at import time, so patch the module-level
+    # name it actually reads in Database.__init__; otherwise every test silently
+    # shares the global /tmp database (and its stale schema).
+    monkeypatch.setattr(db_module, "DATABASE_PATH", str(db_path))
 
     # Reset the global database instance
     db_module._db_instance = None

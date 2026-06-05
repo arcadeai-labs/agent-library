@@ -140,7 +140,7 @@ class VectorStore:
 
         query_blob = serialize_embedding(query_embedding)
 
-        with self.db.connection() as conn:
+        with self.db._connection() as conn:
             # sqlite-vec uses distance (lower is more similar)
             # We convert to similarity for easier understanding
             rows = conn.execute(
@@ -158,6 +158,7 @@ class VectorStore:
                 JOIN documents d ON c.document_id = d.id
                 WHERE ce.embedding MATCH ?
                     AND k = ?
+                    AND c.deleted_at IS NULL
                 ORDER BY ce.distance ASC
                 """,
                 (query_blob, limit * 2),  # Get extra for filtering
@@ -245,7 +246,7 @@ class VectorStore:
         table = self._get_table_for_modality(modality)
         query_blob = serialize_embedding(query_embedding)
 
-        with self.db.connection() as conn:
+        with self.db._connection() as conn:
             rows = conn.execute(
                 f"""
                 SELECT
@@ -261,6 +262,7 @@ class VectorStore:
                 JOIN documents d ON c.document_id = d.id
                 WHERE ve.embedding MATCH ?
                     AND k = ?
+                    AND c.deleted_at IS NULL
                 ORDER BY ve.distance ASC
                 """,  # noqa: S608
                 (query_blob, limit * 2),
@@ -349,7 +351,7 @@ class VectorStore:
         # If modality specified, search only that table
         if modality is not None:
             table = self._get_table_for_modality(modality)
-            with self.db.connection() as conn:
+            with self.db._connection() as conn:
                 row = conn.execute(
                     f"SELECT embedding FROM {table} WHERE chunk_id = ?",  # noqa: S608
                     (chunk_id,),
@@ -360,7 +362,7 @@ class VectorStore:
 
         # Otherwise search all tables
         tables = ["chunk_embeddings", "vec_chunks_code", "vec_chunks_vision"]
-        with self.db.connection() as conn:
+        with self.db._connection() as conn:
             for table in tables:
                 row = conn.execute(
                     f"SELECT embedding FROM {table} WHERE chunk_id = ?",  # noqa: S608
@@ -378,7 +380,7 @@ class VectorStore:
             chunk_id: The chunk ID.
             embedding: The new embedding vector.
         """
-        with self.db._lock, self.db.connection() as conn:
+        with self.db._lock, self.db._connection() as conn:
             # Delete existing embedding if any
             conn.execute("DELETE FROM chunk_embeddings WHERE chunk_id = ?", (chunk_id,))
             # Insert new embedding
@@ -394,7 +396,7 @@ class VectorStore:
         Args:
             chunk_embeddings: List of (chunk_id, embedding) tuples.
         """
-        with self.db._lock, self.db.connection() as conn:
+        with self.db._lock, self.db._connection() as conn:
             for chunk_id, embedding in chunk_embeddings:
                 conn.execute("DELETE FROM chunk_embeddings WHERE chunk_id = ?", (chunk_id,))
                 conn.execute(
