@@ -8,6 +8,7 @@ Supports both text and image inputs for CLIP-based models.
 """
 
 import logging
+import signal
 import threading
 import warnings
 from typing import TYPE_CHECKING, Any, Union
@@ -17,11 +18,50 @@ import numpy as np
 from librarian.config import EMBEDDING_DIMENSION, EMBEDDING_MODEL
 from librarian.processing.embed.base import EmbeddingProvider
 
+# Timeout for model loading (seconds). Prevents indefinite hangs if model
+# download stalls or disk I/O is slow. Set to 0 to disable.
+MODEL_LOAD_TIMEOUT = 120
+
 if TYPE_CHECKING:
     from PIL.Image import Image as PILImage
     from sentence_transformers import SentenceTransformer
 
 logger = logging.getLogger(__name__)
+
+
+class ModelLoadTimeoutError(TimeoutError):
+    """Raised when model loading exceeds the configured timeout."""
+
+    pass
+
+
+class _TimeoutHandler:
+    """Context manager for setting a timeout on model loading (Unix only)."""
+
+    def __init__(self, seconds: int, model_name: str):
+        self.seconds = seconds
+        self.model_name = model_name
+        self._old_handler: Any = None
+
+    def _handler(self, signum: int, frame: Any) -> None:
+        raise ModelLoadTimeoutError(
+            f"Loading model '{self.model_name}' timed out after {self.seconds}s. "
+            f"This may indicate a network issue downloading the model or disk I/O problems. "
+            f"Try running again or pre-download the model."
+        )
+
+    def __enter__(self) -> "_TimeoutHandler":
+        if self.seconds > 0 and hasattr(signal, "SIGALRM"):
+            self._old_handler = signal.signal(signal.SIGALRM, self._handler)
+            signal.alarm(self.seconds)
+        return self
+
+    def __exit__(self, *args: Any) -> None:
+        if self.seconds > 0 and hasattr(signal, "SIGALRM"):
+            signal.alarm(0)
+            if self._old_handler is not None:
+                signal.signal(signal.SIGALRM, self._old_handler)
+
 
 # Suppress sentence-transformers and transformers info/warning messages globally
 # (e.g., "No sentence-transformers model found...", "Using a slow image processor...")
@@ -161,6 +201,11 @@ class LocalEmbeddingProvider(EmbeddingProvider):
 
         Downloads the model from HuggingFace Hub if not cached locally.
         Suppresses noisy progress bars from weight materialization.
+
+        Raises:
+            ImportError: If sentence-transformers or model dependencies are missing.
+            ModelLoadTimeoutError: If model loading exceeds MODEL_LOAD_TIMEOUT.
+            RuntimeError: If model loading fails for other reasons.
         """
         import os
 
@@ -197,10 +242,15 @@ class LocalEmbeddingProvider(EmbeddingProvider):
         )
 
         try:
-            if self._device:
-                self._model = SentenceTransformer(self._model_name, device=self._device)
-            else:
-                self._model = SentenceTransformer(self._model_name)
+            # Use timeout to prevent indefinite hangs during model loading
+            with _TimeoutHandler(MODEL_LOAD_TIMEOUT, self._model_name):
+                if self._device:
+                    self._model = SentenceTransformer(self._model_name, device=self._device)
+                else:
+                    self._model = SentenceTransformer(self._model_name)
+        except ModelLoadTimeoutError:
+            # Re-raise timeout errors with clear message
+            raise
         except ImportError as e:
             # Model loaded but a sub-dependency is missing (e.g., Pillow for CLIP)
             error_str = str(e).lower()
@@ -212,6 +262,12 @@ class LocalEmbeddingProvider(EmbeddingProvider):
                 )
                 raise ImportError(msg) from e
             raise
+        except Exception as e:
+            # Wrap other errors with context about what we were trying to do
+            error_type = type(e).__name__
+            raise RuntimeError(
+                f"Failed to load embedding model '{self._model_name}': {error_type}: {e}"
+            ) from e
         finally:
             # Restore TQDM_DISABLE
             if old_tqdm_disable is None:
@@ -219,12 +275,29 @@ class LocalEmbeddingProvider(EmbeddingProvider):
             else:
                 os.environ["TQDM_DISABLE"] = old_tqdm_disable
 
-        self._dimension = self._model.get_sentence_embedding_dimension()
-        logger.info(
-            "Loaded model %s with dimension %d",
-            self._model_name,
-            self._dimension,
-        )
+        # Some models (e.g., CLIP) return None for get_sentence_embedding_dimension()
+        # or may throw an exception, so wrap in try/except
+        try:
+            raw_dim = self._model.get_sentence_embedding_dimension()
+        except Exception as e:
+            logger.warning(
+                "Failed to get embedding dimension for %s: %s. Using default.",
+                self._model_name,
+                e,
+            )
+            raw_dim = None
+
+        if raw_dim is not None:
+            self._dimension = raw_dim
+            logger.info("Loaded model %s with dimension %d", self._model_name, self._dimension)
+        else:
+            # Fall back to config default
+            self._dimension = EMBEDDING_DIMENSION
+            logger.info(
+                "Loaded model %s (dimension not reported, using default %d)",
+                self._model_name,
+                self._dimension,
+            )
 
     @property
     def dimension(self) -> int:
