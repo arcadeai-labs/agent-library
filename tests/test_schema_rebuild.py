@@ -7,6 +7,7 @@ steered to ``libr index --rebuild``.
 """
 
 import sqlite3
+from contextlib import closing
 from pathlib import Path
 
 import pytest
@@ -50,20 +51,20 @@ class TestSchemaDetection:
     def test_fresh_base_schema_is_empty(self, clean_db: Path) -> None:
         # Base tables exist but nothing has been ingested yet.
         get_database()
-        with sqlite3.connect(str(clean_db)) as conn:
+        with closing(sqlite3.connect(str(clean_db))) as conn:
             assert detect_schema_version(conn) == "empty"
 
     def test_migrated_database_is_v014(self, clean_db: Path) -> None:
         from librarian.storage.sqlite_storage import SQLiteStorage
 
         SQLiteStorage(database=get_database()).migrate()
-        with sqlite3.connect(str(clean_db)) as conn:
+        with closing(sqlite3.connect(str(clean_db))) as conn:
             assert detect_schema_version(conn) == "v0.14"
 
     def test_populated_legacy_database_is_v013(self, clean_db: Path) -> None:
         db = get_database()
         _insert_legacy_embedding(db)
-        with sqlite3.connect(str(clean_db)) as conn:
+        with closing(sqlite3.connect(str(clean_db))) as conn:
             assert detect_schema_version(conn) == "v0.13"
 
 
