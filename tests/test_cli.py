@@ -178,7 +178,7 @@ def test_docs_overview_wraps_long_windows_paths(monkeypatch: pytest.MonkeyPatch)
         lambda: [{"name": "docs", "path": LONG_WINDOWS_PATH, "is_file": False}],
     )
     monkeypatch.setattr(
-        "librarian.storage.database.get_database",
+        "librarian.storage.factory.get_metadata_store",
         lambda: SimpleNamespace(list_documents=lambda: [fake_document()]),
     )
 
@@ -192,7 +192,7 @@ def test_docs_list_table_wraps_long_windows_paths(monkeypatch: pytest.MonkeyPatc
     monkeypatch.setattr(cli, "_get_config", lambda: {"ensure_directories": lambda: None})
     monkeypatch.setattr(cli, "console", Console(width=80, color_system=None))
     monkeypatch.setattr(
-        "librarian.storage.database.get_database",
+        "librarian.storage.factory.get_metadata_store",
         lambda: SimpleNamespace(list_documents=lambda: [fake_document()]),
     )
 
@@ -206,7 +206,7 @@ def test_docs_search_table_wraps_long_windows_paths(monkeypatch: pytest.MonkeyPa
     monkeypatch.setattr(cli, "_get_config", lambda: {"ensure_directories": lambda: None})
     monkeypatch.setattr(cli, "console", Console(width=80, color_system=None))
     monkeypatch.setattr(
-        "librarian.storage.database.get_database",
+        "librarian.storage.factory.get_metadata_store",
         lambda: SimpleNamespace(list_documents=lambda: [fake_document()]),
     )
 
