@@ -161,6 +161,13 @@ class Database:
         else:
             conn.commit()
 
+    def close(self) -> None:
+        """Close the current thread's SQLite connection, if one is open."""
+        conn: sqlite3.Connection | None = getattr(self._local, "connection", None)
+        if conn is not None:
+            conn.close()
+        self._local.connection = None
+
     def _get_vector_dimension(self, conn: sqlite3.Connection) -> int | None:
         """
         Get the dimension of the existing vector table.
