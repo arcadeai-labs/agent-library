@@ -424,7 +424,7 @@ class Orchestrator:
             all_fresh: list[list[float]] = embedder.embed_documents(contents)
             return all_fresh
 
-        from librarian.storage.database import get_effective_embedding_dimension
+        from librarian.config import get_effective_embedding_dimension
 
         expected_dim = get_effective_embedding_dimension()
         existing = self.storage.existing_text_chunks(document_id)

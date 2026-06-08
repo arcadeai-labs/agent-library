@@ -84,8 +84,6 @@ def migrate(conn: Any, schema: str = "public") -> None:
         cur.execute(
             "CREATE UNIQUE INDEX IF NOT EXISTS idx_documents_document_id ON documents(document_id)"
         )
-        cur.execute("CREATE INDEX IF NOT EXISTS idx_documents_path ON documents(path)")
-
         cur.execute(
             """
             CREATE TABLE IF NOT EXISTS chunks (

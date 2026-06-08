@@ -1,5 +1,6 @@
 """Tests for CLI behavior."""
 
+from datetime import datetime, timezone
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -244,6 +245,40 @@ def test_search_paths_outputs_complete_long_windows_paths(
 
     assert result.exit_code == 0
     assert result.output == f"{LONG_WINDOWS_PATH}\n"
+
+
+def test_search_timeframe_uses_configured_metadata_store(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Timeframe filtering must read the active storage backend, not SQLite directly."""
+    monkeypatch.setattr(cli, "_get_config", lambda: {"ensure_directories": lambda: None})
+    monkeypatch.setattr(cli, "console", Console(width=500, color_system=None))
+
+    async def fake_search_library(**kwargs: Any) -> list[dict[str, Any]]:
+        return [
+            {
+                "score": 1.0,
+                "document_path": "/postgres/doc.md",
+                "content": "matched content",
+                "heading_path": None,
+            }
+        ]
+
+    class FakeMetadata:
+        def get_document_by_path(self, path: str) -> Any:
+            assert path == "/postgres/doc.md"
+            return SimpleNamespace(updated_at=datetime.now(timezone.utc))
+
+    monkeypatch.setattr("librarian.server.search_library", fake_search_library)
+    monkeypatch.setattr("librarian.storage.factory.get_metadata_store", lambda: FakeMetadata())
+
+    result = CliRunner().invoke(
+        cli.app,
+        ["search", "postgres", "--timeframe", "today", "--format", "paths"],
+    )
+
+    assert result.exit_code == 0, result.output
+    assert result.output == "/postgres/doc.md\n"
 
 
 class TestIndexRebuild:

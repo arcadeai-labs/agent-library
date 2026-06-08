@@ -267,17 +267,17 @@ def test_sync_state_roundtrip(backend: StorageHarness) -> None:
 
 
 def test_file_mtime_roundtrip(backend: StorageHarness) -> None:
-    assert backend.storage.state.get_file_mtime("contract", "/tmp/doc.md") is None
+    path = "contract/doc.md"
 
-    backend.storage.state.set_file_mtime("contract", "/tmp/doc.md", 123.456)
-    assert backend.storage.state.get_file_mtime("contract", "/tmp/doc.md") == pytest.approx(
-        123.456
-    )
+    assert backend.storage.state.get_file_mtime("contract", path) is None
+
+    backend.storage.state.set_file_mtime("contract", path, 123.456)
+    assert backend.storage.state.get_file_mtime("contract", path) == pytest.approx(123.456)
 
     with backend.storage.transaction() as conn:
-        backend.storage.state.set_file_mtime("contract", "/tmp/doc.md", 789.0, conn=conn)
+        backend.storage.state.set_file_mtime("contract", path, 789.0, conn=conn)
 
-    assert backend.storage.state.get_file_mtime("contract", "/tmp/doc.md") == pytest.approx(789.0)
+    assert backend.storage.state.get_file_mtime("contract", path) == pytest.approx(789.0)
 
 
 def test_vector_search_finds_written_chunk(backend: StorageHarness) -> None:

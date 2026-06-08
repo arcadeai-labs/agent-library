@@ -20,10 +20,9 @@ import sqlite_vec
 
 from librarian.config import (
     DATABASE_PATH,
-    EMBEDDING_DIMENSION,
     EMBEDDING_PROVIDER,
-    OPENAI_EMBEDDING_DIMENSION,
     ensure_directories,
+    get_effective_embedding_dimension,
 )
 from librarian.storage.migrations import run_migrations
 from librarian.types import AssetType, Chunk, Document, EmbeddingModality
@@ -60,13 +59,6 @@ def _json_default(value: Any) -> str:
     if isinstance(value, date | datetime):
         return value.isoformat()
     return str(value)
-
-
-def get_effective_embedding_dimension() -> int:
-    """Get the embedding dimension based on configured provider."""
-    if EMBEDDING_PROVIDER == "openai":
-        return OPENAI_EMBEDDING_DIMENSION
-    return EMBEDDING_DIMENSION
 
 
 # Re-export types for backward compatibility

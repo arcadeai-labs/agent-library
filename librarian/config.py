@@ -94,6 +94,10 @@ SOURCES_CONFIG_PATH = os.path.abspath(
 # default for OSS / local use (zero external dependencies); "postgres" selects
 # the pgvector-backed PostgresStorage (requires the `postgres` extra).
 STORAGE_BACKEND = os.getenv("STORAGE_BACKEND", "sqlite").strip().lower()
+if STORAGE_BACKEND not in {"sqlite", "postgres"}:
+    raise ValueError(
+        f"Invalid STORAGE_BACKEND {STORAGE_BACKEND!r}; expected one of: postgres, sqlite."
+    )
 
 # Postgres connection string (libpq DSN or postgres:// URL). DATABASE_URL is
 # accepted as a fallback so the backend works out of the box on common PaaS.
@@ -121,6 +125,14 @@ EMBEDDING_QUERY_INSTRUCTION = os.getenv(
     "EMBEDDING_QUERY_INSTRUCTION",
     "Given a query, return relevant information from documents.",
 )
+
+
+def get_effective_embedding_dimension() -> int:
+    """Get the text embedding dimension based on the configured provider."""
+    if EMBEDDING_PROVIDER == "openai":
+        return OPENAI_EMBEDDING_DIMENSION
+    return EMBEDDING_DIMENSION
+
 
 # =============================================================================
 # Code Embedding Configuration

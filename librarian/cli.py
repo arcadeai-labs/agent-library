@@ -367,7 +367,9 @@ def _reindex_sources(sources: list[dict[str, Any]], verbose: bool = False) -> tu
     return total_indexed, total_errors
 
 
-def _index_registered_source(source: dict[str, Any], source_path: Path, verbose: bool = False) -> None:
+def _index_registered_source(
+    source: dict[str, Any], source_path: Path, verbose: bool = False
+) -> None:
     """Index an already-registered source without modifying the source registry."""
     from librarian.server import index_directory_to_library as server_ingest
 
@@ -1450,9 +1452,9 @@ def search_cmd(
     if timeframe and results:
         start_dt, end_dt = _get_timeframe_bounds(timeframe)
         filtered = []
-        from librarian.storage.database import get_database
+        from librarian.storage.factory import get_metadata_store
 
-        db = get_database()
+        db = get_metadata_store()
         for r in results:
             doc = db.get_document_by_path(r.get("document_path", ""))
             if doc and doc.updated_at:
@@ -1460,6 +1462,8 @@ def search_cmd(
                     doc_dt = datetime.fromisoformat(doc.updated_at.replace("Z", "+00:00"))
                 else:
                     doc_dt = doc.updated_at
+                if doc_dt.tzinfo is not None:
+                    doc_dt = doc_dt.astimezone().replace(tzinfo=None)
                 if start_dt <= doc_dt <= end_dt:
                     filtered.append(r)
         results = filtered

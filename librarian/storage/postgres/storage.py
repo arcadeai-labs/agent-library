@@ -99,10 +99,10 @@ class PostgresStorage:
     # =========================================================================
 
     def get_sync_state(self, source_key: str) -> SyncState | None:
-        conn = self._db._get_connection()
-        row = conn.execute(
-            "SELECT * FROM sync_state WHERE source_key = %s", (source_key,)
-        ).fetchone()
+        with self._db._connection() as conn:
+            row = conn.execute(
+                "SELECT * FROM sync_state WHERE source_key = %s", (source_key,)
+            ).fetchone()
         if row is None:
             return None
         cursor = row["cursor"]
@@ -163,11 +163,11 @@ class PostgresStorage:
 
     def get_file_mtime(self, source_key: str, path: str) -> float | None:
         """Return the last-recorded mtime for a single file, or ``None``."""
-        conn = self._db._get_connection()
-        row = conn.execute(
-            "SELECT mtime FROM source_file_state WHERE source_key = %s AND path = %s",
-            (source_key, path),
-        ).fetchone()
+        with self._db._connection() as conn:
+            row = conn.execute(
+                "SELECT mtime FROM source_file_state WHERE source_key = %s AND path = %s",
+                (source_key, path),
+            ).fetchone()
         return float(row["mtime"]) if row is not None else None
 
     def set_file_mtime(
@@ -215,10 +215,7 @@ class PostgresStorage:
             """,
             (document_id,),
         ).fetchall()
-        return {
-            row["chunk_id"]: (row["content"], parse_vector(row["embedding"]))
-            for row in rows
-        }
+        return {row["chunk_id"]: (row["content"], parse_vector(row["embedding"])) for row in rows}
 
     def write_upsert(self, conn: Any, prepared: PreparedDocument) -> None:
         """Create-or-replace a document and all its chunks within ``conn``'s txn."""

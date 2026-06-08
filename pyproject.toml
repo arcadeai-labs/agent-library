@@ -62,7 +62,6 @@ pdf = [
 ]
 postgres = [
     "psycopg[binary]>=3.1.0",
-    "pgvector>=0.3.0",
 ]
 ocr = [
     "pytesseract>=0.3.10",
@@ -140,10 +139,17 @@ source_modules = [
     "librarian.orchestrator",
 ]
 forbidden_modules = [
+    "librarian.storage.database",
     "librarian.storage.sqlite_storage",
     "librarian.storage.postgres",
     "librarian.storage.vector_store",
     "librarian.storage.fts_store",
+]
+ignore_imports = [
+    # SQLite-only maintenance/backcompat paths. Normal app-facing read/write
+    # paths must go through librarian.storage.factory.
+    "librarian.cli -> librarian.storage.database",
+    "librarian.server -> librarian.storage.database",
 ]
 # Direct imports only: these modules may depend on concrete backends through
 # librarian.storage.factory, which is the approved substrate-selection boundary.
