@@ -172,6 +172,19 @@ def test_reingest_is_idempotent(backend: StorageHarness) -> None:
     assert set(backend.chunk_ids()) == ids_first  # same deterministic ids
 
 
+def test_existing_text_chunks_returns_live_text_embeddings(backend: StorageHarness) -> None:
+    embedder = FakeEmbedder()
+    prepared = _prepare("m1", "hello world", embedder)
+    _write(backend, prepared)
+
+    existing = backend.storage.existing_text_chunks(prepared.document_id)
+
+    assert set(existing) == {prepared.chunks[0].chunk_id}
+    content, embedding = existing[prepared.chunks[0].chunk_id]
+    assert content == "hello world"
+    assert embedding == pytest.approx(prepared.chunks[0].embedding)
+
+
 def test_write_and_cursor_advance_commit_together(backend: StorageHarness) -> None:
     from librarian.storage.protocols import SyncState
 
@@ -251,6 +264,20 @@ def test_sync_state_roundtrip(backend: StorageHarness) -> None:
     backend.storage.put_sync_state(SyncState(source_key="contract", cursor={"i": 9}, status="ok"))
     assert backend.count("sync_state") == 1
     assert backend.storage.get_sync_state("contract").cursor == {"i": 9}  # type: ignore[union-attr]
+
+
+def test_file_mtime_roundtrip(backend: StorageHarness) -> None:
+    assert backend.storage.state.get_file_mtime("contract", "/tmp/doc.md") is None
+
+    backend.storage.state.set_file_mtime("contract", "/tmp/doc.md", 123.456)
+    assert backend.storage.state.get_file_mtime("contract", "/tmp/doc.md") == pytest.approx(
+        123.456
+    )
+
+    with backend.storage.transaction() as conn:
+        backend.storage.state.set_file_mtime("contract", "/tmp/doc.md", 789.0, conn=conn)
+
+    assert backend.storage.state.get_file_mtime("contract", "/tmp/doc.md") == pytest.approx(789.0)
 
 
 def test_vector_search_finds_written_chunk(backend: StorageHarness) -> None:

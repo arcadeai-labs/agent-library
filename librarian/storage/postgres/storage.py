@@ -23,6 +23,7 @@ from librarian.config import POSTGRES_DSN, POSTGRES_SCHEMA
 from librarian.storage.postgres.database import (
     PostgresDatabase,
     _json_default,
+    parse_vector,
     vector_literal,
 )
 from librarian.storage.postgres.fts_store import PgFTSStore
@@ -160,9 +161,64 @@ class PostgresStorage:
         if own:
             conn.commit()
 
+    def get_file_mtime(self, source_key: str, path: str) -> float | None:
+        """Return the last-recorded mtime for a single file, or ``None``."""
+        conn = self._db._get_connection()
+        row = conn.execute(
+            "SELECT mtime FROM source_file_state WHERE source_key = %s AND path = %s",
+            (source_key, path),
+        ).fetchone()
+        return float(row["mtime"]) if row is not None else None
+
+    def set_file_mtime(
+        self,
+        source_key: str,
+        path: str,
+        mtime: float,
+        conn: Any = None,
+    ) -> None:
+        """Upsert one file's mtime, joining ``conn``'s transaction when given."""
+        own = conn is None
+        conn = conn or self._db._get_connection()
+        conn.execute(
+            """
+            INSERT INTO source_file_state (source_key, path, mtime)
+            VALUES (%s, %s, %s)
+            ON CONFLICT(source_key, path) DO UPDATE SET
+                mtime = excluded.mtime,
+                updated_at = now()
+            """,
+            (source_key, path, mtime),
+        )
+        if own:
+            conn.commit()
+
     # =========================================================================
     # Write paths
     # =========================================================================
+
+    def existing_text_chunks(self, document_id: str) -> dict[str, tuple[str, list[float] | None]]:
+        """Return the document's live chunks as ``chunk_id -> (content, text_embedding)``.
+
+        Mirrors SQLiteStorage so the orchestrator can reuse unchanged text
+        embeddings before replacing a document's chunks.
+        """
+        conn = self._db._get_connection()
+        rows = conn.execute(
+            """
+            SELECT c.chunk_id, c.content, ce.embedding AS embedding
+            FROM chunks c
+            LEFT JOIN chunk_embeddings ce ON ce.chunk_id = c.id
+            WHERE c.document_id = (SELECT id FROM documents WHERE document_id = %s)
+              AND c.deleted_at IS NULL
+              AND c.chunk_id IS NOT NULL
+            """,
+            (document_id,),
+        ).fetchall()
+        return {
+            row["chunk_id"]: (row["content"], parse_vector(row["embedding"]))
+            for row in rows
+        }
 
     def write_upsert(self, conn: Any, prepared: PreparedDocument) -> None:
         """Create-or-replace a document and all its chunks within ``conn``'s txn."""

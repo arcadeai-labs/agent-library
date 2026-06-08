@@ -278,16 +278,13 @@ async def index_directory_to_library(
         "files": [],
     }
 
-    db = get_metadata_store()
-
     # Build storage + orchestrator once for the whole run. Constructing them per
     # file would re-run migrate() (schema introspection + index/DDL + commit) on
     # every iteration, defeating the migrate-once singleton.
     from librarian.orchestrator import Orchestrator
-    from librarian.storage.sqlite_storage import SQLiteStorage
 
-    storage = SQLiteStorage(database=db)
-    storage.migrate()
+    storage = get_storage()
+    db = storage.metadata
     orchestrator = Orchestrator(storage=storage)
 
     for file_path in all_files:

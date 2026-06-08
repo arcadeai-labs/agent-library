@@ -158,6 +158,21 @@ def migrate(conn: Any, schema: str = "public") -> None:
             )
             """
         )
+        cur.execute(
+            """
+            CREATE TABLE IF NOT EXISTS source_file_state (
+                source_key TEXT NOT NULL,
+                path TEXT NOT NULL,
+                mtime DOUBLE PRECISION NOT NULL,
+                updated_at TIMESTAMPTZ DEFAULT now(),
+                PRIMARY KEY (source_key, path)
+            )
+            """
+        )
+        cur.execute(
+            "CREATE INDEX IF NOT EXISTS idx_source_file_state_source "
+            "ON source_file_state(source_key)"
+        )
 
     conn.commit()
     logger.info("v0.14 Postgres schema migration complete")

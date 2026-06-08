@@ -130,6 +130,25 @@ forbidden_modules = [
 # write backend, not those typing-only edges.
 allow_indirect_imports = true
 
+[[tool.importlinter.contracts]]
+name = "App-facing storage consumers use the storage factory, not concrete backends"
+type = "forbidden"
+source_modules = [
+    "librarian.cli",
+    "librarian.server",
+    "librarian.retrieval",
+    "librarian.orchestrator",
+]
+forbidden_modules = [
+    "librarian.storage.sqlite_storage",
+    "librarian.storage.postgres",
+    "librarian.storage.vector_store",
+    "librarian.storage.fts_store",
+]
+# Direct imports only: these modules may depend on concrete backends through
+# librarian.storage.factory, which is the approved substrate-selection boundary.
+allow_indirect_imports = true
+
 [tool.hatch.build.targets.wheel]
 packages = ["librarian"]
 

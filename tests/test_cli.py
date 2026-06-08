@@ -80,6 +80,47 @@ def test_add_directory_exits_nonzero_when_indexing_errors(
     assert "parser exploded" in result.output
 
 
+def test_add_existing_source_reindexes_without_duplicate(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A registered source may still need indexing in the active backend."""
+    source = tmp_path / "README.md"
+    source.write_text("# README\n\nstorage", encoding="utf-8")
+
+    config_dir = tmp_path / "config"
+    sources_file = config_dir / "sources.json"
+    monkeypatch.setattr(cli, "CONFIG_DIR", config_dir)
+    monkeypatch.setattr(cli, "SOURCES_FILE", sources_file)
+    monkeypatch.setattr(cli, "SETTINGS_FILE", config_dir / "settings.json")
+    monkeypatch.setattr(cli, "_get_config", lambda: {"ensure_directories": lambda: None})
+    monkeypatch.setattr(cli, "console", Console(width=500, color_system=None))
+
+    cli._save_sources([
+        {
+            "name": "README.md",
+            "path": str(source),
+            "type": "local",
+            "is_file": True,
+        }
+    ])
+
+    indexed: list[Path] = []
+
+    def fake_index_path(file_path: Path, verbose: bool = False) -> dict[str, Any]:
+        indexed.append(file_path)
+        return {"status": "created", "chunks": 1}
+
+    monkeypatch.setattr(cli, "_index_path", fake_index_path)
+
+    result = CliRunner().invoke(cli.app, ["add", str(source)])
+
+    assert result.exit_code == 0
+    assert indexed == [source.resolve()]
+    assert "Source already registered" in result.output
+    assert "Source indexed" in result.output
+    assert len(cli._load_sources()) == 1
+
+
 def test_search_table_wraps_long_windows_paths(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

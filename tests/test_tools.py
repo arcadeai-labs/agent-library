@@ -28,6 +28,42 @@ class TestIngestionTools:
         assert result["indexed"] >= 0 or result["updated"] >= 0
 
     @pytest.mark.asyncio
+    async def test_index_directory_uses_configured_storage(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Directory ingest must use the selected storage bundle, not SQLite directly."""
+        from librarian import server
+
+        docs_dir = tmp_path / "docs"
+        docs_dir.mkdir()
+        (docs_dir / "note.md").write_text("# Note\n\nBody.", encoding="utf-8")
+
+        class FakeMetadata:
+            def get_document_by_path(self, path: str) -> None:
+                return None
+
+        class FakeStorage:
+            metadata = FakeMetadata()
+
+        storage = FakeStorage()
+
+        class FakeOrchestrator:
+            def __init__(self, storage: Any) -> None:
+                assert storage is fake_storage
+
+            def index_file(self, file_path: Path) -> dict[str, Any]:
+                return {"path": str(file_path), "status": "created"}
+
+        fake_storage = storage
+        monkeypatch.setattr(server, "get_storage", lambda: fake_storage)
+        monkeypatch.setattr("librarian.orchestrator.Orchestrator", FakeOrchestrator)
+
+        result = await server.index_directory_to_library(context=CTX, directory=str(docs_dir))
+
+        assert result["indexed"] == 1
+        assert result["errors"] == []
+
+    @pytest.mark.asyncio
     async def test_index_nonexistent_directory(self, clean_db: Path) -> None:
         """Test indexing from a nonexistent directory raises a retryable error."""
         from librarian.server import index_directory_to_library
