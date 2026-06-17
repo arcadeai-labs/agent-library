@@ -2,6 +2,8 @@
 
 Claude Code is the terminal-based version of Claude. It uses the same MCP server interface as Claude Desktop, but you configure it from the shell.
 
+For an opinionated usage pattern after setup, see [Coding Agents](coding-agents.md).
+
 ## Prerequisites
 
 - You ran the [Quickstart](../quickstart.md) and have at least one folder indexed.

@@ -439,10 +439,13 @@ def _get_siblings(path: Path, include_dirs: bool = True) -> list[dict[str, str]]
 )
 async def add_to_library(
     context: Context,
-    content: Annotated[str, "The text content to store in the library"],
+    content: Annotated[
+        str, "The durable content to store. Skip transient logs, scratch notes, or chat output."
+    ],
     title: Annotated[str, "A title or filename for this content (without .md extension)"],
     directory: Annotated[
-        str, "Absolute path to directory for storage. Use get_library_overview to find valid paths."
+        str,
+        "Absolute path to store it in. Use get_library_overview or suggest_library_location before writing.",
     ] = "",
     tags: Annotated[list[str] | None, "Optional tags to categorize this content"] = None,
     metadata: Annotated[dict[str, Any] | None, "Optional additional metadata"] = None,
@@ -453,20 +456,12 @@ async def add_to_library(
     """
     Store new content in the agent's library.
 
-    IMPORTANT: Before adding content, use get_library_overview() to see available
-    locations and their purposes. Pass the full directory path from that tool.
+    Save only durable, reusable knowledge that is likely to help in a future
+    session. Do not use this as a dump for every response, plan, or debug log.
 
-    Use this to save any text, notes, information, or knowledge that should
-    be remembered and searchable later. The content is indexed for both
-    semantic (meaning-based) and keyword search, making it easy to find
-    relevant information in future conversations.
-
-    Examples of what to store:
-    - Meeting notes and summaries
-    - Research findings and insights
-    - Code documentation and explanations
-    - Personal notes and reminders
-    - Any information worth remembering
+    Before writing, inspect the library with get_library_overview() and, when
+    placement is unclear, use suggest_library_location(). If a related document
+    already exists, prefer update_library_doc() instead of creating a duplicate.
     """
     if not title or not title.strip():
         raise RetryableToolError(
@@ -629,8 +624,8 @@ async def add_to_library(
 )
 async def update_library_doc(
     context: Context,
-    path: Annotated[str, "Absolute path to the document to update"],
-    content: Annotated[str, "The new content to replace the existing content"],
+    path: Annotated[str, "Absolute path to the existing document to refine or replace"],
+    content: Annotated[str, "The replacement content for that durable note or artifact"],
 ) -> Annotated[
     UpdateOutput,
     "Confirmation of update plus chunk count from the re-index step.",
@@ -638,8 +633,9 @@ async def update_library_doc(
     """
     Update existing content in the agent's library.
 
-    Use this to modify or replace content that was previously stored.
-    The updated content will be re-indexed for search.
+    Use this when refining an existing note, plan, or artifact that already
+    belongs in the library. Prefer this over add_to_library() when the new
+    content would otherwise become a near-duplicate document.
     """
     file_path = _resolve_path(path, "document path")
 
@@ -706,10 +702,13 @@ async def update_library_doc(
 )
 async def search_library(
     context: Context,
-    query: Annotated[str, "What to search for in the library"],
+    query: Annotated[
+        str,
+        "What durable knowledge to look up. Use this first for recall, prior context, or indexed docs.",
+    ],
     mode: Annotated[
         SearchMode,
-        "Search method: hybrid (semantic + keyword, default), semantic (meaning-based), or keyword (exact match)",
+        "Search method: hybrid (default), semantic, or keyword. Hybrid is usually the right first pass.",
     ] = SearchMode.HYBRID,
     asset_type: Annotated[
         AssetType | None,
@@ -735,16 +734,10 @@ async def search_library(
     """
     Search the agent's library for relevant information.
 
-    This is the primary way to find stored knowledge. Supports three search modes:
-    - hybrid (default): Combines semantic understanding with keyword matching for best results
-    - semantic: Finds content with similar meaning, even without exact word matches
-    - keyword: Finds content containing the specific words in your query
-
-    Use this when you need to:
-    - Find previously stored information
-    - Look up notes or documentation
-    - Recall context from past conversations
-    - Search code, PDFs, images, or text documents
+    This is the primary recall tool. Use it before answering when the task may
+    depend on prior sessions, indexed documents, or durable user or project
+    context. After you find a promising hit, call read_from_library() before
+    relying on it.
     """
     if not query.strip():
         return []
@@ -902,7 +895,7 @@ async def search_library(
 )
 async def read_from_library(
     context: Context,
-    path: Annotated[str, "Absolute path to the document to read"],
+    path: Annotated[str, "Absolute path to the document to read in full after a search hit"],
 ) -> Annotated[
     ReadOutput,
     "Full document content plus metadata. `indexed=False` if read directly from disk.",
@@ -910,8 +903,8 @@ async def read_from_library(
     """
     Read the full content of a document from the library.
 
-    Use this after searching to get the complete content of a
-    document, rather than just the matching snippets.
+    Use this after search_library() when a snippet looks relevant and you need
+    the full note before citing it, summarizing it, or acting on it.
     """
     db = get_database()
     doc = db.get_document_by_path(path)
@@ -1324,7 +1317,7 @@ if ENABLE_OPTIONAL_TOOLS:
         view: Annotated[
             LibraryView,
             "Which slice of the library to return: 'sections' (top-level subdirs with "
-            "doc counts and sample titles — best for choosing where to add content), "
+            "doc counts and sample titles - best for choosing where to add durable content), "
             "'stats' (library totals and current config), or 'tree' (recursive "
             "filesystem walk, depth-controlled).",
         ] = LibraryView.SECTIONS,
@@ -1337,13 +1330,13 @@ if ENABLE_OPTIONAL_TOOLS:
         """
         Inspect the library structure.
 
-        THIS IS THE PRIMARY TOOL TO INSPECT THE LIBRARY BEFORE ADDING CONTENT.
+        THIS IS THE PRIMARY TOOL TO INSPECT THE LIBRARY BEFORE WRITING.
 
         Three views are available:
         - 'sections' (default): top-level subdirectories of each source with
           document counts and sample titles. Each section's path is what you
-          pass as `directory` to add_to_library(). Use this when you want to
-          place new content somewhere sensible.
+          pass as `directory` to add_to_library(). Use this to avoid noisy or
+          arbitrary placement.
         - 'stats': aggregate document/chunk counts and the current chunking +
           search configuration. Use this for "how big is my library?".
         - 'tree': recursive filesystem tree per source, capped at `depth`.
@@ -1365,16 +1358,17 @@ if ENABLE_OPTIONAL_TOOLS:
     @app.tool(metadata=ToolMetadata(behavior=_READ_ONLY_BEHAVIOR))  # type: ignore[arg-type]
     async def suggest_library_location(
         context: Context,
-        title: Annotated[str, "The title of the content you want to add"],
-        content_summary: Annotated[str, "A brief description of what the content is about"] = "",
+        title: Annotated[str, "The title of the durable content you may add"],
+        content_summary: Annotated[
+            str, "Brief summary used to find the best existing location"
+        ] = "",
     ) -> SuggestResult:
         """
         Get suggestions for where to store new content in the library.
 
-        Analyzes the title and optional summary to suggest the best location(s)
-        based on existing library organization and similar documents.
-
-        Returns ranked suggestions with paths ready to use with add_to_library().
+        Use this before add_to_library() when you know something is worth saving
+        but are unsure where it belongs. It helps keep long-term memory tidy by
+        suggesting locations near similar existing documents.
         """
         from librarian.tool_outputs import LocationSuggestion, SimilarDocument
 
