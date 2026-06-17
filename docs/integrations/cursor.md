@@ -2,8 +2,6 @@
 
 Cursor supports MCP servers natively as of late 2024. Hooking up Agent Library lets Cursor search your notes and external knowledge alongside whatever's open in your editor.
 
-For an opinionated usage pattern after setup, see [Coding Agents](coding-agents.md).
-
 ## Prerequisites
 
 - You ran the [Quickstart](../quickstart.md) and have at least one folder indexed.
