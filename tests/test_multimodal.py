@@ -119,7 +119,10 @@ class TestParserRegistry:
     ) -> None:
         """Image parser should not silently disable OCR when ENABLE_OCR is unset."""
         from librarian import config as config_module
-        from librarian.processing.parsers.image import ImageParser
+        from librarian.processing.parsers.image import PIL_AVAILABLE, ImageParser
+
+        if not PIL_AVAILABLE:
+            pytest.skip("Pillow not installed")
 
         monkeypatch.delenv("ENABLE_OCR", raising=False)
         monkeypatch.setattr(config_module, "ENABLE_OCR", True)
