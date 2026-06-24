@@ -82,6 +82,7 @@ warnings.filterwarnings("ignore", message=".*slow image processor.*", category=F
 # (following the pattern used in parsers/image.py and parsers/pdf.py)
 # =============================================================================
 
+
 def _is_module_available(module_name: str) -> bool:
     """Return True when a module can be imported without importing it."""
     return importlib.util.find_spec(module_name) is not None

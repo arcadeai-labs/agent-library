@@ -403,7 +403,9 @@ def get_embedder(provider_type: str | None = None) -> Embedder:
 
     # Check if we need a different provider type
     elif provider_type:
-        current_is_local = _embedder_instance.provider.__class__.__name__ == "LocalEmbeddingProvider"
+        current_is_local = (
+            _embedder_instance.provider.__class__.__name__ == "LocalEmbeddingProvider"
+        )
         requested_is_local = requested_type == "local"
 
         if current_is_local != requested_is_local:
