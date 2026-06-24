@@ -24,6 +24,7 @@ Usage:
 
 import logging
 import threading
+from typing import TYPE_CHECKING
 
 from librarian.config import (
     CODE_EMBEDDING_MODEL,
@@ -34,9 +35,11 @@ from librarian.config import (
     VISION_EMBEDDING_MODEL,
 )
 from librarian.processing.embed.base import EmbeddingProvider
-from librarian.processing.embed.local import LocalEmbeddingProvider, ModelLoadTimeoutError
 from librarian.processing.embed.openai import OpenAIEmbeddingProvider
 from librarian.types import EmbeddingModality
+
+if TYPE_CHECKING:
+    from librarian.processing.embed.local import LocalEmbeddingProvider, ModelLoadTimeoutError
 
 logger = logging.getLogger(__name__)
 
@@ -51,6 +54,19 @@ __all__ = [
     "get_embedder_for_modality",
     "get_embedding_registry",
 ]
+
+
+def __getattr__(name: str) -> object:
+    """Lazily expose local embedding classes without importing ML dependencies."""
+    if name in {"LocalEmbeddingProvider", "ModelLoadTimeoutError"}:
+        from librarian.processing.embed.local import LocalEmbeddingProvider, ModelLoadTimeoutError
+
+        lazy_exports: dict[str, object] = {
+            "LocalEmbeddingProvider": LocalEmbeddingProvider,
+            "ModelLoadTimeoutError": ModelLoadTimeoutError,
+        }
+        return lazy_exports[name]
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
 
 
 class Embedder:
@@ -206,6 +222,8 @@ class EmbeddingRegistry:
             if not ENABLE_CODE_EMBEDDINGS:
                 return None
             try:
+                from librarian.processing.embed.local import LocalEmbeddingProvider
+
                 if CODE_EMBEDDING_PROVIDER == "local":
                     provider = LocalEmbeddingProvider(model_name=CODE_EMBEDDING_MODEL)
                 else:
@@ -226,6 +244,8 @@ class EmbeddingRegistry:
             if not ENABLE_VISION_EMBEDDINGS:
                 return None
             try:
+                from librarian.processing.embed.local import LocalEmbeddingProvider
+
                 provider = LocalEmbeddingProvider(model_name=VISION_EMBEDDING_MODEL)
                 # Eagerly validate dependencies (does NOT load the model)
                 provider.validate()
@@ -339,6 +359,8 @@ def _create_provider(provider_type: str | None = None) -> EmbeddingProvider:
     provider_type = provider_type or EMBEDDING_PROVIDER
 
     if provider_type == "local":
+        from librarian.processing.embed.local import LocalEmbeddingProvider
+
         logger.info("Using local embedding provider (sentence-transformers)")
         return LocalEmbeddingProvider()
 
@@ -381,7 +403,7 @@ def get_embedder(provider_type: str | None = None) -> Embedder:
 
     # Check if we need a different provider type
     elif provider_type:
-        current_is_local = isinstance(_embedder_instance.provider, LocalEmbeddingProvider)
+        current_is_local = _embedder_instance.provider.__class__.__name__ == "LocalEmbeddingProvider"
         requested_is_local = requested_type == "local"
 
         if current_is_local != requested_is_local:

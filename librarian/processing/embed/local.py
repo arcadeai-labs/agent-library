@@ -7,6 +7,7 @@ Supports lazy loading to avoid startup overhead when embeddings aren't needed.
 Supports both text and image inputs for CLIP-based models.
 """
 
+import importlib.util
 import logging
 import signal
 import threading
@@ -81,20 +82,13 @@ warnings.filterwarnings("ignore", message=".*slow image processor.*", category=F
 # (following the pattern used in parsers/image.py and parsers/pdf.py)
 # =============================================================================
 
-try:
-    from PIL import Image as _PIL_Image  # noqa: F401
+def _is_module_available(module_name: str) -> bool:
+    """Return True when a module can be imported without importing it."""
+    return importlib.util.find_spec(module_name) is not None
 
-    PILLOW_AVAILABLE = True
-except ImportError:
-    PILLOW_AVAILABLE = False
 
-try:
-    import torch as _torch  # noqa: F401
-    import transformers as _transformers  # noqa: F401
-
-    TRANSFORMERS_AVAILABLE = True
-except ImportError:
-    TRANSFORMERS_AVAILABLE = False
+PILLOW_AVAILABLE = _is_module_available("PIL")
+TRANSFORMERS_AVAILABLE = _is_module_available("torch") and _is_module_available("transformers")
 
 # Type alias for content that can be embedded (text or image)
 EmbeddableContent = Union[str, "PILImage"]  # type: ignore[no-any-unimported]

@@ -109,8 +109,8 @@ EMBEDDING_QUERY_INSTRUCTION = os.getenv(
 # Code Embedding Configuration
 # =============================================================================
 
-# Code embeddings enabled by default for better code search using CodeBERT
-ENABLE_CODE_EMBEDDINGS = safe_bool(os.getenv("ENABLE_CODE_EMBEDDINGS"), True)
+# Code embeddings are opt-in so the default text semantic path stays lightweight.
+ENABLE_CODE_EMBEDDINGS = safe_bool(os.getenv("ENABLE_CODE_EMBEDDINGS"), False)
 CODE_EMBEDDING_MODEL = os.getenv("CODE_EMBEDDING_MODEL", "microsoft/codebert-base")
 CODE_EMBEDDING_DIMENSION = safe_int(os.getenv("CODE_EMBEDDING_DIMENSION"), 768)
 CODE_EMBEDDING_PROVIDER = os.getenv("CODE_EMBEDDING_PROVIDER", "local")
@@ -119,8 +119,8 @@ CODE_EMBEDDING_PROVIDER = os.getenv("CODE_EMBEDDING_PROVIDER", "local")
 # Vision Embedding Configuration
 # =============================================================================
 
-# Vision embeddings enabled by default for image search using CLIP
-ENABLE_VISION_EMBEDDINGS = safe_bool(os.getenv("ENABLE_VISION_EMBEDDINGS"), True)
+# Vision embeddings are opt-in because CLIP is a large optional warmup path.
+ENABLE_VISION_EMBEDDINGS = safe_bool(os.getenv("ENABLE_VISION_EMBEDDINGS"), False)
 # Use sentence-transformers CLIP model name (not HuggingFace format)
 VISION_EMBEDDING_MODEL = os.getenv("VISION_EMBEDDING_MODEL", "clip-ViT-B-32")
 VISION_EMBEDDING_DIMENSION = safe_int(os.getenv("VISION_EMBEDDING_DIMENSION"), 512)

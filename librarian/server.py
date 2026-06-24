@@ -18,7 +18,7 @@ shadows stdlib `types` and crashes import on `from types import GenericAlias`.
 import logging
 import sys
 from pathlib import Path
-from typing import Annotated, Any
+from typing import TYPE_CHECKING, Annotated, Any
 
 from arcade_core.metadata import (
     Behavior,
@@ -43,10 +43,7 @@ from librarian.config import (
     SERVER_PORT,
     ensure_directories,
 )
-from librarian.indexing import get_indexing_service
-from librarian.processing.embed import get_embedder
 from librarian.processing.parsers.base import FileReadError, FileReadTimeoutError
-from librarian.retrieval.search import HybridSearcher
 from librarian.sources.ignore import (
     GitignoreMatcher,
     LibrarianTrackMatcher,
@@ -73,6 +70,9 @@ from librarian.tool_outputs import (
 from librarian.types import AssetType, EmbeddingModality, LibraryView, SearchMode
 from librarian.utils.timeframe import Timeframe, get_timeframe_bounds, parse_date_string
 
+if TYPE_CHECKING:
+    from librarian.retrieval.search import HybridSearcher
+
 logger = logging.getLogger(__name__)
 
 # Create the MCP application
@@ -91,14 +91,32 @@ ensure_directories()
 # =============================================================================
 
 
-def _get_searcher() -> HybridSearcher:
+def get_embedder(provider_type: str | None = None) -> Any:
+    """Return the configured embedder, importing the embedding stack lazily.
+
+    Args:
+        provider_type: Optional embedding provider override.
+
+    Returns:
+        The configured embedder instance.
+    """
+    from librarian.processing.embed import get_embedder as _get_embedder
+
+    return _get_embedder(provider_type)
+
+
+def _get_searcher() -> "HybridSearcher":
     """Get a configured hybrid searcher instance."""
+    from librarian.retrieval.search import HybridSearcher
+
     embedder = get_embedder()
     return HybridSearcher(embedder)
 
 
 def _process_and_index_file(file_path: Path) -> dict[str, Any]:
     """Process a markdown file and add it to the index."""
+    from librarian.indexing import get_indexing_service
+
     return get_indexing_service().index_file(file_path)
 
 
