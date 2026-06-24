@@ -114,6 +114,23 @@ class TestParserRegistry:
         assert registry.get_asset_type(Path("file.py")) == AssetType.CODE
         assert registry.get_asset_type(Path("file.js")) == AssetType.CODE
 
+    def test_image_parser_uses_configured_ocr_default(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Image parser should not silently disable OCR when ENABLE_OCR is unset."""
+        from librarian import config as config_module
+        from librarian.processing.parsers.image import ImageParser
+
+        monkeypatch.delenv("ENABLE_OCR", raising=False)
+        monkeypatch.setattr(config_module, "ENABLE_OCR", True)
+
+        test_file = Path(__file__).parent / "data" / "test_diagram.png"
+        parser, asset_type = get_parser_for_file(test_file)
+
+        assert asset_type == AssetType.IMAGE
+        assert isinstance(parser, ImageParser)
+        assert parser.enable_ocr is True
+
 
 class TestCodeChunking:
     """Test code-specific chunking."""
