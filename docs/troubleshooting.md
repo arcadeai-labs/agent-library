@@ -14,15 +14,17 @@ export PATH="$HOME/.local/bin:$PATH"
 
 Add that line to `~/.zshrc` or `~/.bashrc` to make it stick.
 
-## First run is taking forever
+## Install or first semantic search is taking forever
 
 The first `uv tool install "agent-library[all]==0.13.0"` (or `uvx ...` invocation) downloads:
 
 - The Agent Library package
-- `sentence-transformers` and `torch` (~500 MB)
-- Optional vision/code models on first search (~1 GB)
+- `sentence-transformers` and `torch`
+- Optional parser dependencies when you install `[all]`
 
-Plan on 2–5 minutes the first time. Subsequent runs use the cached install and start in under a second.
+The MCP server itself avoids importing the ML stack at startup. The local text embedding model loads lazily on the first semantic search or indexing operation; the default model is `all-MiniLM-L6-v2` (~80 MB). Specialized code and vision models are opt-in and can add hundreds of MB when enabled.
+
+Plan on a few minutes the first time if the package or model cache is cold. Subsequent runs use cached packages and models.
 
 If it seems stuck, run with verbose output:
 
@@ -40,16 +42,16 @@ Three things to check:
 
 ## "First time" timeouts inside Claude
 
-Claude Desktop has an internal timeout for MCP server startup. If your first run hits the ~2-minute model download, Claude may give up before the server is ready.
+Claude Desktop has internal timeouts around MCP startup and tool calls. Startup should be quick, but the first semantic search can still download and load the text embedding model.
 
-**Fix:** Warm the cache once at the terminal first:
+**Fix:** Warm the text embedding cache once at the terminal first:
 
 ```bash
 uv tool install "agent-library[all]==0.13.0"
-librarian --help
+librarian config models
 ```
 
-Then restart Claude. The next launch will reuse the cached install.
+Then restart Claude. The next launch and first semantic search will reuse the cached install/model.
 
 ## "ModuleNotFoundError: No module named 'pypdf'" / 'PIL'
 
