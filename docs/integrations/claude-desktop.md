@@ -104,10 +104,10 @@ You can verify the connection by checking the bottom of the Claude window — wh
     The most common cause is that Claude was already running when you saved the config. Quit it completely (<kbd>Cmd</kbd>+<kbd>Q</kbd>, not just close window) and reopen.
 
 !!! warning "Claude says the tool errored out"
-    Open `~/Library/Logs/Claude/mcp-server-librarian.log` (macOS) or the equivalent on your OS. The first run downloads ~2 GB of models, which can take a couple of minutes — Claude may time out before that finishes. Run the install command once at the terminal first to warm the cache:
+    Open `~/Library/Logs/Claude/mcp-server-librarian.log` (macOS) or the equivalent on your OS. The MCP server starts without loading the local ML stack, but the first semantic search may still download and load the text embedding model. Run the model warmup once at the terminal first:
 
     ```bash
-    librarian --help
+    librarian config models
     ```
 
     Then restart Claude.

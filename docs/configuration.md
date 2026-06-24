@@ -111,6 +111,8 @@ Set these per-project to keep work and personal libraries separate.
 
 The library uses an **embedding model** to map text into vectors so semantic search can find meaning matches. The default is fast and small; bigger models give better results at the cost of disk space and CPU.
 
+Embedding dependencies can be installed without being imported at server startup. The MCP server imports quickly, and the local text model is loaded lazily the first time semantic search or indexing actually needs embeddings.
+
 | Variable | Default | What it does |
 |---|---|---|
 | `EMBEDDING_PROVIDER` | `local` | Either `local` (sentence-transformers on your machine) or `openai` (any OpenAI-compatible endpoint) |
@@ -154,11 +156,13 @@ If you'd rather offload embedding to a hosted service (OpenAI, vLLM, llama.cpp's
 
 ## Code embeddings
 
-When `ENABLE_CODE_EMBEDDINGS=true` (the default), source code files are embedded with a code-specific model in addition to the regular text embedder. This makes "find the function that handles retries" work even when "retry" isn't in the comments.
+When `ENABLE_CODE_EMBEDDINGS=true`, source code files are embedded with a code-specific model in addition to the regular text embedder. This makes "find the function that handles retries" work even when "retry" isn't in the comments.
+
+Code embeddings are disabled by default so normal text semantic search stays lightweight. Code files still index and search through the regular text embedding path unless you explicitly enable this specialized model.
 
 | Variable | Default | What it does |
 |---|---|---|
-| `ENABLE_CODE_EMBEDDINGS` | `true` | Turn the code path on/off |
+| `ENABLE_CODE_EMBEDDINGS` | `false` | Turn the code path on/off |
 | `CODE_EMBEDDING_MODEL` | `microsoft/codebert-base` | The code embedding model |
 | `CODE_EMBEDDING_DIMENSION` | `768` | Vector dimension |
 | `CODE_EMBEDDING_PROVIDER` | `local` | `local` or `openai` |
@@ -172,18 +176,20 @@ The code path activates when the model name contains `codebert` or `codellama`. 
 | `microsoft/codebert-base` *(default)* | 768 | 500 MB | Multi-language, balanced speed/quality | [→](https://huggingface.co/microsoft/codebert-base) |
 | `microsoft/graphcodebert-base` | 768 | 500 MB | Better at structural code matches (data flow / graph aware) | [→](https://huggingface.co/microsoft/graphcodebert-base) |
 
-!!! tip "Don't have any code in your library?"
-    Set `ENABLE_CODE_EMBEDDINGS=false` to skip loading the model entirely. Saves ~500 MB and a couple seconds at startup.
+!!! tip "Want specialized code search?"
+    Set `ENABLE_CODE_EMBEDDINGS=true` to opt into CodeBERT. This can add ~500 MB and extra first-use warmup time.
 
 ---
 
 ## Vision embeddings
 
-Image files (PNG, JPG, GIF, WEBP) get a separate visual embedding so semantic search works across diagrams and screenshots. This uses CLIP — a model that maps images and text into the same vector space, so a query like "auth flow" finds matching diagrams.
+Image files (PNG, JPG, GIF, WEBP) can get a separate visual embedding so semantic search works across diagrams and screenshots. This uses CLIP — a model that maps images and text into the same vector space, so a query like "auth flow" finds matching diagrams.
+
+Vision embeddings are disabled by default. Image metadata and OCR text can still be indexed; enable this path when you want visual similarity search over images.
 
 | Variable | Default | What it does |
 |---|---|---|
-| `ENABLE_VISION_EMBEDDINGS` | `true` | Turn the vision path on/off |
+| `ENABLE_VISION_EMBEDDINGS` | `false` | Turn the vision path on/off |
 | `VISION_EMBEDDING_MODEL` | `clip-ViT-B-32` | The CLIP-family model |
 | `VISION_EMBEDDING_DIMENSION` | `512` | Vector dimension |
 
