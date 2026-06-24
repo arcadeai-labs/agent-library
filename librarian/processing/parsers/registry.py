@@ -127,9 +127,9 @@ class ParserRegistry:
             if asset_type == AssetType.IMAGE:
                 import os
 
-                from librarian.config import safe_bool
+                from librarian.config import ENABLE_OCR, safe_bool
 
-                enable_ocr = safe_bool(os.getenv("ENABLE_OCR"), False)
+                enable_ocr = safe_bool(os.getenv("ENABLE_OCR"), ENABLE_OCR)
                 return parser_class(enable_ocr=enable_ocr), asset_type  # type: ignore[call-arg]
 
             return parser_class(), asset_type
