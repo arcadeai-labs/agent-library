@@ -1317,6 +1317,109 @@ def search_cmd(
 
 
 # =============================================================================
+# libr health - Retrieval health diagnostics
+# =============================================================================
+
+
+@app.command("health")
+def health_cmd(
+    source: Annotated[
+        Optional[str],
+        typer.Option("--source", "-s", help="Limit health checks to a registered source"),
+    ] = None,
+    show_files: Annotated[
+        bool,
+        typer.Option("--show-files", help="Show file-level issue samples"),
+    ] = False,
+    output_json: Annotated[bool, typer.Option("--json", help="Output as JSON")] = False,
+    sample_limit: Annotated[
+        int,
+        typer.Option("--sample-limit", help="Maximum issue samples collected per check"),
+    ] = 20,
+) -> None:
+    """Scan the indexed library for retrieval health issues."""
+    cfg = _get_config()
+    cfg["ensure_directories"]()
+
+    from librarian.health import run_health_check
+
+    report = run_health_check(
+        sources=_load_sources(),
+        source=source,
+        sample_limit=sample_limit,
+    )
+
+    if output_json:
+        print(json.dumps(report.to_dict(), indent=2, default=str))
+        return
+
+    index_table = Table(title="Library Health", show_header=True, header_style="bold cyan")
+    index_table.add_column("Metric", style="green")
+    index_table.add_column("Value", justify="right", style="yellow")
+
+    index_table.add_row("Documents", str(report.document_count))
+    index_table.add_row("Chunks", str(report.chunk_count))
+    index_table.add_row("Embeddings", str(report.embedding_count))
+    index_table.add_row("FTS Rows", str(report.fts_count))
+    index_table.add_row("Embedding Coverage", f"{report.embedding_coverage * 100:.1f}%")
+    index_table.add_row("FTS Coverage", f"{report.fts_coverage * 100:.1f}%")
+    index_table.add_row("Database", report.database_path)
+    console.print(index_table)
+
+    if report.document_asset_counts or report.chunk_asset_counts:
+        asset_table = Table(title="Asset Distribution", show_header=True, header_style="bold cyan")
+        asset_table.add_column("Asset Type", style="green")
+        asset_table.add_column("Documents", justify="right", style="yellow")
+        asset_table.add_column("Chunks", justify="right", style="yellow")
+
+        asset_types = sorted(set(report.document_asset_counts) | set(report.chunk_asset_counts))
+        for asset_type in asset_types:
+            asset_table.add_row(
+                asset_type,
+                str(report.document_asset_counts.get(asset_type, 0)),
+                str(report.chunk_asset_counts.get(asset_type, 0)),
+            )
+        console.print(asset_table)
+
+    embedding_table = Table(title="Embedding Tables", show_header=True, header_style="bold cyan")
+    embedding_table.add_column("Modality", style="green")
+    embedding_table.add_column("Rows", justify="right", style="yellow")
+    for modality, count in report.embedding_counts.items():
+        embedding_table.add_row(modality, str(count))
+    console.print(embedding_table)
+
+    if not report.issues:
+        rprint("[green]No health issues found.[/green]")
+        return
+
+    severity_order = {"high": 0, "medium": 1, "low": 2}
+    sorted_issues = sorted(
+        report.issues,
+        key=lambda issue: (severity_order.get(issue.severity, 99), issue.code, issue.path or ""),
+    )
+    visible_issues = sorted_issues if show_files else sorted_issues[:10]
+
+    issue_table = Table(title="Issues", show_header=True, header_style="bold cyan")
+    issue_table.add_column("Severity", style="red")
+    issue_table.add_column("Code", style="magenta")
+    issue_table.add_column("Message", style="yellow")
+    if show_files:
+        issue_table.add_column("Path", style="blue", overflow="fold")
+
+    for issue in visible_issues:
+        row = [issue.severity, issue.code, issue.message]
+        if show_files:
+            row.append(issue.path or "")
+        issue_table.add_row(*row)
+
+    console.print(issue_table)
+
+    hidden_count = len(sorted_issues) - len(visible_issues)
+    if hidden_count > 0:
+        rprint(f"[dim]Showing 10 of {len(sorted_issues)} issues. Use --show-files for more.[/dim]")
+
+
+# =============================================================================
 # libr config - Configuration
 # =============================================================================
 
