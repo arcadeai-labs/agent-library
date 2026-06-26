@@ -5,7 +5,11 @@ from pathlib import Path
 
 import pytest
 
-from librarian.storage.database import Database
+from librarian.storage.database import (
+    Database,
+    SqliteExtensionError,
+    _load_sqlite_vec,
+)
 from librarian.types import AssetType, Document
 
 
@@ -13,6 +17,30 @@ from librarian.types import AssetType, Document
 def db(tmp_path: Path) -> Database:
     """Fresh Database instance per test, isolated to a tmp file."""
     return Database(db_path=str(tmp_path / "test.db"))
+
+
+class TestSqliteExtensionLoading:
+    """Loading the sqlite-vec extension across SQLite builds with and without
+    loadable-extension support."""
+
+    def test_missing_enable_load_extension_raises_actionable_error(self) -> None:
+        """A SQLite build without `enable_load_extension` must raise a clear
+        SqliteExtensionError, not an opaque AttributeError. Regression: frozen
+        PyInstaller binaries / macOS system Python crashed `cade mem add .`."""
+
+        class _ExtensionlessConnection:
+            """Mimics a stdlib sqlite3 build compiled without extension support."""
+
+        with pytest.raises(SqliteExtensionError, match="pysqlite3-binary"):
+            _load_sqlite_vec(_ExtensionlessConnection())  # type: ignore[arg-type]
+
+    def test_load_succeeds_on_capable_connection(self, tmp_path: Path) -> None:
+        """When the SQLite build supports extensions, sqlite-vec loads cleanly."""
+        # A real Database init exercises _load_sqlite_vec; success means the
+        # vec0 virtual table was created without error.
+        database = Database(db_path=str(tmp_path / "vec.db"))
+        stats = database.get_stats()
+        assert stats["document_count"] == 0
 
 
 class TestMetadataSerialization:

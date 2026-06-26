@@ -1,6 +1,6 @@
 [project]
 name = "agent-library"
-version = "0.14.0"
+version = "0.14.1"
 description = "Multi-modal knowledge library with vector and full-text search for text, code, images, and PDFs"
 readme = "README.md"
 license = "Apache-2.0"
@@ -27,6 +27,13 @@ dependencies = [
     "arcade-tdk>=3.8.0",
     "sentence-transformers>=2.2.0",
     "sqlite-vec>=0.1.0",
+    # Bundles a SQLite built with loadable-extension support, required for
+    # sqlite-vec when the stdlib sqlite3 lacks enable_load_extension (some
+    # PyInstaller-frozen binaries). pysqlite3-binary only publishes Linux
+    # x86_64 wheels, so the marker keeps macOS/Windows resolution working; on
+    # those platforms the runtime guard in storage.database surfaces an
+    # actionable error if the active SQLite can't load extensions.
+    "pysqlite3-binary>=0.5.0; platform_system == 'Linux' and platform_machine == 'x86_64'",
     "pyyaml>=6.0",
     "python-frontmatter>=1.0.0",
     "numpy>=1.24.0",
