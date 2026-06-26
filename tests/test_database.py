@@ -31,7 +31,7 @@ class TestSqliteExtensionLoading:
         class _ExtensionlessConnection:
             """Mimics a stdlib sqlite3 build compiled without extension support."""
 
-        with pytest.raises(SqliteExtensionError, match="pysqlite3-binary"):
+        with pytest.raises(SqliteExtensionError, match="loadable-extension support"):
             _load_sqlite_vec(_ExtensionlessConnection())  # type: ignore[arg-type]
 
     def test_load_succeeds_on_capable_connection(self, tmp_path: Path) -> None:

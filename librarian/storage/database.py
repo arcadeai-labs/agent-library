@@ -7,6 +7,7 @@ and provides the core Database class for all storage operations.
 
 import json
 import logging
+import sqlite3
 import struct
 import threading
 from collections.abc import Generator
@@ -15,21 +16,6 @@ from datetime import date, datetime
 from typing import Any
 
 import sqlite_vec
-
-# Prefer pysqlite3 (from the `pysqlite3-binary` wheel), which bundles a modern
-# SQLite compiled with loadable-extension support. The stdlib `sqlite3` shipped
-# with some Python builds — notably PyInstaller-frozen binaries and macOS system
-# Python — is built without `--enable-loadable-sqlite-extensions`, so loading the
-# sqlite-vec extension fails. Fall back to stdlib `sqlite3` when pysqlite3 isn't
-# installed (extension support is then validated lazily in ``_load_sqlite_vec``).
-try:
-    import pysqlite3 as sqlite3  # type: ignore[import-not-found, no-redef]
-
-    SQLITE_BACKEND = "pysqlite3"
-except ImportError:
-    import sqlite3  # type: ignore[no-redef]
-
-    SQLITE_BACKEND = "stdlib"
 
 from librarian.config import (
     DATABASE_PATH,
@@ -67,10 +53,10 @@ def _load_sqlite_vec(conn: sqlite3.Connection) -> None:
     if not hasattr(conn, "enable_load_extension"):
         raise SqliteExtensionError(
             "This Python's sqlite3 was built without loadable-extension support, "
-            "which is required for vector search. Install 'pysqlite3-binary' in "
-            "this environment (pip install pysqlite3-binary), or use a Python built "
-            "with --enable-loadable-sqlite-extensions. "
-            f"(active sqlite backend: {SQLITE_BACKEND})"
+            "which is required for vector search (sqlite-vec). Use a Python built "
+            "with --enable-loadable-sqlite-extensions — e.g. the python.org "
+            "installer, Homebrew python, or uv's managed interpreters "
+            "(python-build-standalone)."
         )
     conn.enable_load_extension(True)
     try:
