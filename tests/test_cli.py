@@ -225,6 +225,8 @@ def test_health_json_outputs_report(monkeypatch: pytest.MonkeyPatch) -> None:
     assert result.exit_code == 0
     assert '"document_count": 1' in result.output
     assert '"chunk_count": 2' in result.output
+
+
 def test_prog_name_defaults_to_libr() -> None:
     """Standalone CLI keeps the historical `libr` program name."""
     import importlib
