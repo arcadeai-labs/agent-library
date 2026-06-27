@@ -44,9 +44,14 @@ from librarian.sources.ignore import (
     should_skip_file,
 )
 
+# Program name shown in help text and usage hints. Defaults to "libr" for the
+# standalone CLI, but an embedding host (e.g. cade's `cade mem`) can override it
+# via LIBRARIAN_PROG_NAME so every printed hint matches how it was invoked.
+PROG_NAME = os.environ.get("LIBRARIAN_PROG_NAME", "libr")
+
 # Initialize Typer app
 app = typer.Typer(
-    name="libr",
+    name=PROG_NAME,
     help="Librarian - Context Management Service",
     add_completion=True,
     rich_markup_mode="rich",
@@ -366,7 +371,7 @@ def list_sources(
         rprint(
             Panel(
                 "[yellow]No sources registered yet.[/yellow]\n\n"
-                "Add a source with: [cyan]libr add <path>[/cyan]",
+                f"Add a source with: [cyan]{PROG_NAME} add <path>[/cyan]",
                 title="Document Sources",
             )
         )
@@ -402,8 +407,8 @@ def list_sources(
                 rprint(f"    - {p}")
         rprint()
         rprint("To remove a specific source, use:")
-        rprint("  [cyan]libr rm <name> --path <full-path>[/cyan]")
-        rprint("  [cyan]libr rm <full-path>[/cyan]")
+        rprint(f"  [cyan]{PROG_NAME} rm <name> --path <full-path>[/cyan]")
+        rprint(f"  [cyan]{PROG_NAME} rm <full-path>[/cyan]")
 
 
 # =============================================================================
@@ -543,7 +548,7 @@ def add_source(
         rprint(
             "  This will create duplicate names. Consider using --name to specify a unique name:"
         )
-        rprint(f"  [cyan]libr add {path} --name {source_name}-2[/cyan]")
+        rprint(f"  [cyan]{PROG_NAME} add {path} --name {source_name}-2[/cyan]")
         rprint()
         if not typer.confirm("Continue anyway?", default=False):
             rprint("[yellow]Cancelled.[/yellow]")
@@ -703,10 +708,10 @@ def remove_source(
                     rprint(f"  [{i}] {s.get('path')}")
                 rprint()
                 rprint("Please specify which one using --path:")
-                rprint(f"  libr rm {name} --path <path>")
+                rprint(f"  {PROG_NAME} rm {name} --path <path>")
                 rprint()
                 rprint("Or remove by full path:")
-                rprint("  libr rm <full-path>")
+                rprint(f"  {PROG_NAME} rm <full-path>")
                 raise typer.Exit(1)
 
     if not to_remove:
@@ -806,7 +811,7 @@ def index_build(
     all_sources = _load_sources()
     if not all_sources:
         rprint("[yellow]No sources registered. Add a source first:[/yellow]")
-        rprint("  [cyan]libr add <path>[/cyan]")
+        rprint(f"  [cyan]{PROG_NAME} add <path>[/cyan]")
         raise typer.Exit(1)
 
     # Filter to specific source if requested
@@ -924,7 +929,7 @@ def index_clean(
     db.clear_all()
 
     rprint("[green]Index cleared.[/green]")
-    rprint("[dim]Run 'libr index build' to rebuild.[/dim]")
+    rprint(f"[dim]Run '{PROG_NAME} index build' to rebuild.[/dim]")
 
 
 @index_app.command("clobber")
@@ -979,7 +984,7 @@ def docs_overview(ctx: typer.Context) -> None:
         rprint(
             Panel(
                 "[yellow]No sources registered.[/yellow]\n\n"
-                "Add a source with: [cyan]libr add <path>[/cyan]",
+                f"Add a source with: [cyan]{PROG_NAME} add <path>[/cyan]",
                 title="Documents",
             )
         )
@@ -1610,7 +1615,7 @@ def config_set(
 
     _save_settings(settings)
     rprint(f"[green]Set {key}=[/green]{value}")
-    rprint("[dim]Note: Restart 'libr serve' for changes to take effect.[/dim]")
+    rprint(f"[dim]Note: Restart '{PROG_NAME} serve' for changes to take effect.[/dim]")
 
 
 @config_app.command("edit")

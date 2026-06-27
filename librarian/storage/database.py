@@ -30,6 +30,41 @@ from librarian.types import AssetType, Chunk, Document, EmbeddingModality
 logger = logging.getLogger(__name__)
 
 
+class SqliteExtensionError(RuntimeError):
+    """Raised when the active SQLite build cannot load the sqlite-vec extension.
+
+    Vector search requires a SQLite library compiled with loadable-extension
+    support. This error surfaces an actionable message instead of the opaque
+    ``AttributeError: 'sqlite3.Connection' object has no attribute
+    'enable_load_extension'`` raised by extension-less builds.
+    """
+
+
+def _load_sqlite_vec(conn: sqlite3.Connection) -> None:
+    """Load the sqlite-vec extension into a connection.
+
+    Args:
+        conn: An open SQLite connection.
+
+    Raises:
+        SqliteExtensionError: If the active SQLite build was compiled without
+            loadable-extension support (``enable_load_extension`` is missing).
+    """
+    if not hasattr(conn, "enable_load_extension"):
+        raise SqliteExtensionError(
+            "This Python's sqlite3 was built without loadable-extension support, "
+            "which is required for vector search (sqlite-vec). Use a Python built "
+            "with --enable-loadable-sqlite-extensions — e.g. the python.org "
+            "installer, Homebrew python, or uv's managed interpreters "
+            "(python-build-standalone)."
+        )
+    conn.enable_load_extension(True)
+    try:
+        sqlite_vec.load(conn)
+    finally:
+        conn.enable_load_extension(False)
+
+
 def _json_default(value: Any) -> str:
     """JSON fallback for types YAML frontmatter emits but stdlib json can't encode.
 
@@ -55,6 +90,7 @@ __all__ = [
     "Chunk",
     "Database",
     "Document",
+    "SqliteExtensionError",
     "deserialize_embedding",
     "get_database",
     "get_effective_embedding_dimension",
@@ -120,10 +156,7 @@ class Database:
                 check_same_thread=False,
             )
             conn.row_factory = sqlite3.Row
-            # Load sqlite-vec extension
-            conn.enable_load_extension(True)
-            sqlite_vec.load(conn)
-            conn.enable_load_extension(False)
+            _load_sqlite_vec(conn)
             # Enable foreign keys
             conn.execute("PRAGMA foreign_keys = ON")
             self._local.connection = conn

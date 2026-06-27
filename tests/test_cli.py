@@ -225,3 +225,29 @@ def test_health_json_outputs_report(monkeypatch: pytest.MonkeyPatch) -> None:
     assert result.exit_code == 0
     assert '"document_count": 1' in result.output
     assert '"chunk_count": 2' in result.output
+def test_prog_name_defaults_to_libr() -> None:
+    """Standalone CLI keeps the historical `libr` program name."""
+    import importlib
+    import os
+
+    saved = os.environ.pop("LIBRARIAN_PROG_NAME", None)
+    try:
+        reloaded = importlib.reload(cli)
+        assert reloaded.PROG_NAME == "libr"
+    finally:
+        if saved is not None:
+            os.environ["LIBRARIAN_PROG_NAME"] = saved
+        importlib.reload(cli)
+
+
+def test_usage_hints_use_configured_prog_name(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Embedding hosts (e.g. `cade mem`) get usage hints branded to match."""
+    monkeypatch.setattr(cli, "console", Console(width=200, color_system=None))
+    monkeypatch.setattr(cli, "PROG_NAME", "cade mem")
+    monkeypatch.setattr(cli, "_load_sources", lambda: [])
+
+    result = CliRunner().invoke(cli.app, ["list"])
+
+    assert result.exit_code == 0
+    assert "cade mem add" in result.output
+    assert "libr add" not in result.output
