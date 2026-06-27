@@ -205,6 +205,28 @@ def test_search_paths_outputs_complete_long_windows_paths(
     assert result.output == f"{LONG_WINDOWS_PATH}\n"
 
 
+def test_health_json_outputs_report(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Health command should expose machine-readable diagnostics."""
+    monkeypatch.setattr(cli, "_get_config", lambda: {"ensure_directories": lambda: None})
+    monkeypatch.setattr(cli, "_load_sources", lambda: [])
+
+    fake_report = SimpleNamespace(
+        to_dict=lambda: {
+            "document_count": 1,
+            "chunk_count": 2,
+            "embedding_count": 2,
+            "issues": [],
+        }
+    )
+    monkeypatch.setattr("librarian.health.run_health_check", lambda **kwargs: fake_report)
+
+    result = CliRunner().invoke(cli.app, ["health", "--json"])
+
+    assert result.exit_code == 0
+    assert '"document_count": 1' in result.output
+    assert '"chunk_count": 2' in result.output
+
+
 def test_prog_name_defaults_to_libr() -> None:
     """Standalone CLI keeps the historical `libr` program name."""
     import importlib
