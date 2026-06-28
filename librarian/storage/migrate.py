@@ -31,8 +31,6 @@ import sqlite3
 
 logger = logging.getLogger(__name__)
 
-V14_SCHEMA_VERSION = 14
-
 # New flat columns, keyed by table.
 _DOCUMENT_COLUMNS: dict[str, str] = {
     "document_id": "TEXT",

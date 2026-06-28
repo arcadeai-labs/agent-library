@@ -33,8 +33,6 @@ from librarian.storage.schema_version import SchemaRebuildRequired
 
 logger = logging.getLogger(__name__)
 
-V14_SCHEMA_VERSION = 14
-
 # A regconfig embedded in DDL (the generated column) can't be a bound parameter,
 # so restrict it to a plain identifier to keep it injection-safe.
 _REGCONFIG_RE = re.compile(r"^[a-z_][a-z0-9_]*$")
