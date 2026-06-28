@@ -17,6 +17,7 @@ import os
 import uuid
 from collections.abc import Iterator
 from dataclasses import dataclass
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
@@ -51,6 +52,12 @@ class StorageHarness:
         with self.storage.database._connection() as conn:
             rows = conn.execute("SELECT chunk_id FROM chunks ORDER BY id").fetchall()
         return [row["chunk_id"] for row in rows]
+
+    def internal_chunk_ids(self) -> list[int]:
+        """Internal ``chunks.id`` PKs (what the public-field/embedding reads key on)."""
+        with self.storage.database._connection() as conn:
+            rows = conn.execute("SELECT id FROM chunks ORDER BY id").fetchall()
+        return [row["id"] for row in rows]
 
 
 # =============================================================================
@@ -238,6 +245,30 @@ def test_soft_delete_tombstones_without_removing_rows(backend: StorageHarness) -
     assert backend.count("chunks", "deletion_reason = 'gone'") == 1
 
 
+def test_soft_delete_hides_document_from_search(backend: StorageHarness) -> None:
+    """A tombstoned document must disappear from BOTH vector and FTS search.
+
+    soft_delete only sets deleted_at (the embedding/FTS rows survive), so each
+    search store must filter ``deleted_at IS NULL``. This is the assertion that
+    catches a missing filter on either backend.
+    """
+    embedder = FakeEmbedder()
+    prepared = _prepare("m1", "the quick brown fox", embedder)
+    _write(backend, prepared)
+
+    query = embedder.embed_documents(["the quick brown fox"])[0]
+    # Present before deletion.
+    assert backend.storage.vectors.search(query, limit=5, min_similarity=-1.0)
+    assert backend.storage.fts.search("quick fox", limit=5)
+
+    with backend.storage.transaction() as conn:
+        backend.storage.soft_delete_document(conn, prepared.document_id, "gone")
+
+    # Gone from both search paths after the tombstone.
+    assert backend.storage.vectors.search(query, limit=5, min_similarity=-1.0) == []
+    assert backend.storage.fts.search("quick fox", limit=5) == []
+
+
 def test_sync_state_roundtrip(backend: StorageHarness) -> None:
     from librarian.storage.protocols import SyncState
 
@@ -330,3 +361,89 @@ def test_stats_reports_counts(backend: StorageHarness) -> None:
     assert stats["document_count"] == 1
     assert stats["chunk_count"] == 1
     assert stats["embedding_count"] == 1
+
+
+def test_read_protocol_parity(backend: StorageHarness) -> None:
+    """Exercise the read surface most prone to substrate-specific SQL drift.
+
+    These methods carry the timezone/CASE, modality-table, embedding-text-parse
+    and id-lookup divergences, so they're where parity is most likely to break
+    silently if only one backend is tested.
+    """
+    embedder = FakeEmbedder()
+    p1 = _prepare("m1", "the quick brown fox", embedder)
+    p2 = _prepare("m2", "lorem ipsum dolor", embedder)
+    _write(backend, p1)
+    _write(backend, p2)
+
+    meta = backend.storage.metadata
+
+    # get_document_by_id round-trips with get_document_by_path.
+    doc = meta.get_document_by_path("m1")
+    assert doc is not None
+    by_id = meta.get_document_by_id(doc.id)
+    assert by_id is not None
+    assert by_id.path == "m1"
+    assert meta.get_document_by_id(10_000_000) is None
+
+    # list_documents with a window spanning "now" returns both documents.
+    now = datetime.now(timezone.utc)
+    start, end = now - timedelta(days=1), now + timedelta(days=1)
+    docs = meta.list_documents(start_date=start, end_date=end)
+    assert {d.path for d in docs} == {"m1", "m2"}
+
+    # get_document_ids_in_timerange (updated_at branch -- no file_mtime set).
+    in_range = meta.get_document_ids_in_timerange(start, end)
+    ids2 = meta.get_document_by_path("m2")
+    assert ids2 is not None
+    assert set(in_range) == {doc.id, ids2.id}
+
+    # get_chunk_public_fields keyed by internal chunks.id.
+    internal_ids = backend.internal_chunk_ids()
+    assert len(internal_ids) == 2
+    public = meta.get_chunk_public_fields(internal_ids)
+    assert set(public) == set(internal_ids)
+    assert all(fields["chunk_index"] == 0 for fields in public.values())
+    assert meta.get_chunk_public_fields([]) == {}
+
+    # search_by_modality(TEXT) finds the matching chunk.
+    query = embedder.embed_documents(["the quick brown fox"])[0]
+    modality_hits = backend.storage.vectors.search_by_modality(
+        query, EmbeddingModality.TEXT, limit=5, min_similarity=-1.0
+    )
+    assert any(r.document_path == "m1" for r in modality_hits)
+
+    # get_embedding returns the stored TEXT vector for a chunk (embedding::text
+    # parse path on Postgres, blob deserialize on SQLite).
+    m1_chunk_internal_id = internal_ids[0]
+    stored = backend.storage.vectors.get_embedding(m1_chunk_internal_id)
+    assert stored is not None
+    assert len(stored) == EMBED_DIM
+    assert meta.get_chunk_public_fields([m1_chunk_internal_id])  # sanity: id exists
+
+
+def test_postgres_param_not_silently_skipped() -> None:
+    """When TEST_POSTGRES_DSN is set, a Postgres run must actually happen.
+
+    Guards against a misconfigured DSN (or a missing ``psycopg``) turning the
+    parameterized Postgres run into a green-but-skipped no-op: with the DSN set,
+    psycopg must import and the schema must migrate, or this fails loudly.
+    """
+    dsn = os.getenv("TEST_POSTGRES_DSN")
+    if not dsn:
+        pytest.skip("TEST_POSTGRES_DSN not set")
+
+    import psycopg  # noqa: F401  -- ImportError here should FAIL, not skip
+    from psycopg import sql
+
+    from librarian.storage.postgres import PostgresStorage
+
+    schema = f"librarian_test_{uuid.uuid4().hex}"
+    storage = PostgresStorage(dsn=dsn, schema=schema)
+    storage.migrate()
+    try:
+        assert storage.metadata.get_stats()["document_count"] == 0
+    finally:
+        conn = storage.database._get_connection()
+        conn.execute(sql.SQL("DROP SCHEMA IF EXISTS {} CASCADE").format(sql.Identifier(schema)))
+        storage.database.close()

@@ -16,13 +16,16 @@ import json
 import logging
 from collections.abc import Generator
 from contextlib import contextmanager
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Any
 
+import librarian.config as config
 from librarian.config import POSTGRES_DSN, POSTGRES_SCHEMA
+from librarian.storage._common import iso as _iso
+from librarian.storage._common import json_default as _json_default
+from librarian.storage._common import modality_table as _modality_table
 from librarian.storage.postgres.database import (
     PostgresDatabase,
-    _json_default,
     parse_vector,
     vector_literal,
 )
@@ -31,23 +34,10 @@ from librarian.storage.postgres.migrate import migrate as migrate_schema
 from librarian.storage.postgres.vector_store import PgVectorStore
 from librarian.storage.protocols import SyncState
 from librarian.storage.write_models import PreparedDocument
-from librarian.types import EmbeddingModality
 
 logger = logging.getLogger(__name__)
 
 __all__ = ["PostgresStorage", "get_postgres_storage"]
-
-
-def _modality_table(modality: EmbeddingModality) -> str:
-    if modality == EmbeddingModality.CODE:
-        return "vec_chunks_code"
-    if modality == EmbeddingModality.VISION:
-        return "vec_chunks_vision"
-    return "chunk_embeddings"
-
-
-def _iso(value: datetime | None) -> str | None:
-    return value.isoformat() if value is not None else None
 
 
 class PostgresStorage:
@@ -81,28 +71,28 @@ class PostgresStorage:
     def transaction(self) -> Generator[Any, None, None]:
         """Yield the thread-local connection as one atomic transaction.
 
-        Commits on clean exit, rolls back on exception. Content writes and
-        cursor advances issued in the same ``with`` block commit or roll back
+        Opens a real ``conn.transaction()`` block on the autocommit connection:
+        commits on clean exit, rolls back on exception. Reads issued inside this
+        block (e.g. ``get_sync_state``) run in the same transaction without
+        committing it, so content writes and cursor advances commit or roll back
         together.
         """
         conn = self._db._get_connection()
-        try:
+        with conn.transaction():
             yield conn
-        except Exception:
-            conn.rollback()
-            raise
-        else:
-            conn.commit()
 
     # =========================================================================
     # StateStore
     # =========================================================================
 
     def get_sync_state(self, source_key: str) -> SyncState | None:
-        with self._db._connection() as conn:
-            row = conn.execute(
-                "SELECT * FROM sync_state WHERE source_key = %s", (source_key,)
-            ).fetchone()
+        # Bare read on the (autocommit) thread-local connection: standalone it
+        # commits nothing; nested inside a ``transaction()`` block it joins that
+        # transaction without committing it (the atomicity guarantee).
+        conn = self._db._get_connection()
+        row = conn.execute(
+            "SELECT * FROM sync_state WHERE source_key = %s", (source_key,)
+        ).fetchone()
         if row is None:
             return None
         cursor = row["cursor"]
@@ -162,12 +152,16 @@ class PostgresStorage:
             conn.commit()
 
     def get_file_mtime(self, source_key: str, path: str) -> float | None:
-        """Return the last-recorded mtime for a single file, or ``None``."""
-        with self._db._connection() as conn:
-            row = conn.execute(
-                "SELECT mtime FROM source_file_state WHERE source_key = %s AND path = %s",
-                (source_key, path),
-            ).fetchone()
+        """Return the last-recorded mtime for a single file, or ``None``.
+
+        Bare read (see :meth:`get_sync_state`): safe to call inside a write
+        ``transaction()`` without committing it.
+        """
+        conn = self._db._get_connection()
+        row = conn.execute(
+            "SELECT mtime FROM source_file_state WHERE source_key = %s AND path = %s",
+            (source_key, path),
+        ).fetchone()
         return float(row["mtime"]) if row is not None else None
 
     def set_file_mtime(
@@ -202,6 +196,11 @@ class PostgresStorage:
 
         Mirrors SQLiteStorage so the orchestrator can reuse unchanged text
         embeddings before replacing a document's chunks.
+
+        This is a bare read on the autocommit connection, so it does not hold a
+        snapshot open across the (potentially slow/network) embed call that
+        follows in the orchestrator -- no idle-in-transaction, nothing to block
+        VACUUM.
         """
         conn = self._db._get_connection()
         rows = conn.execute(
@@ -281,6 +280,11 @@ class PostgresStorage:
         return int(row["id"])
 
     def _replace_chunks(self, conn: Any, doc_pk: int, prepared: PreparedDocument) -> None:
+        # TODO(DEV-472): batch these writes. This issues 2N round-trips per
+        # document (one chunk INSERT...RETURNING + one embedding INSERT per
+        # chunk). In-process SQLite hides the cost, but on Postgres it dominates
+        # ingest latency for large documents -- switch to a multi-row
+        # INSERT...RETURNING (psycopg execute_values) + bulk embedding insert.
         for chunk in prepared.chunks:
             row = conn.execute(
                 """
@@ -326,7 +330,7 @@ class PostgresStorage:
 
     def soft_delete_document(self, conn: Any, document_id: str, reason: str | None) -> int:
         """Tombstone all chunks of a document. Returns the number tombstoned."""
-        now = datetime.now().isoformat()
+        now = datetime.now(timezone.utc).isoformat()
         cursor = conn.execute(
             """
             UPDATE chunks
@@ -339,13 +343,24 @@ class PostgresStorage:
         return int(cursor.rowcount)
 
 
-_storage_instance: PostgresStorage | None = None
+_storage_instances: dict[tuple[str, str], PostgresStorage] = {}
 
 
 def get_postgres_storage() -> PostgresStorage:
-    """Get a process-wide :class:`PostgresStorage` (migrated to v0.14)."""
-    global _storage_instance
-    if _storage_instance is None:
-        _storage_instance = PostgresStorage()
-        _storage_instance.migrate()
-    return _storage_instance
+    """Get a process-wide :class:`PostgresStorage` (migrated to v0.14).
+
+    The instance is cached on the active ``(POSTGRES_DSN, POSTGRES_SCHEMA)`` pair
+    rather than as a single global. Reading config dynamically means a test that
+    isolates substrates per-schema -- or a deployment that rotates its DSN -- gets
+    a fresh, correctly-targeted instance instead of silently reusing the first
+    schema/DSN bound at startup.
+    """
+    dsn = config.POSTGRES_DSN
+    schema = config.POSTGRES_SCHEMA
+    key = (dsn or "", schema)
+    instance = _storage_instances.get(key)
+    if instance is None:
+        instance = PostgresStorage(dsn=dsn, schema=schema)
+        instance.migrate()
+        _storage_instances[key] = instance
+    return instance

@@ -13,7 +13,7 @@ import threading
 import warnings
 from collections.abc import Generator
 from contextlib import contextmanager
-from datetime import date, datetime
+from datetime import datetime
 from typing import Any
 
 import sqlite_vec
@@ -24,6 +24,7 @@ from librarian.config import (
     ensure_directories,
     get_effective_embedding_dimension,
 )
+from librarian.storage._common import json_default as _json_default
 from librarian.storage.migrations import run_migrations
 from librarian.types import AssetType, Chunk, Document, EmbeddingModality
 
@@ -46,19 +47,6 @@ def _warn_deprecated_mutator(method: str) -> None:
         DeprecationWarning,
         stacklevel=3,
     )
-
-
-def _json_default(value: Any) -> str:
-    """JSON fallback for types YAML frontmatter emits but stdlib json can't encode.
-
-    Obsidian and other markdown frontmatter commonly contain `YYYY-MM-DD` values
-    which PyYAML parses into `datetime.date`. Stored as ISO strings; round-tripped
-    values come back as strings (acceptable because metadata is informational,
-    not queried as dates).
-    """
-    if isinstance(value, date | datetime):
-        return value.isoformat()
-    return str(value)
 
 
 # Re-export types for backward compatibility

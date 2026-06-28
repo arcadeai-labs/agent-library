@@ -3,9 +3,19 @@ PostgresDatabase -- connection management and read-side metadata access.
 
 Mirrors the read surface of :class:`librarian.storage.database.Database` (the
 SQLite metadata store) so the retrieval and MCP layers are substrate-agnostic.
-Connections are thread-local with an ``RLock``, matching the SQLite manager's
-concurrency model; each connection pins ``search_path`` to the configured
-schema so multiple deployments (and isolated test runs) can share one database.
+Connections are thread-local: each thread gets its own ``psycopg`` connection,
+so no application-level lock is needed (psycopg connections are not shared
+across threads). Every connection runs in ``autocommit`` mode and pins
+``search_path`` to the configured schema; explicit multi-statement atomicity is
+opened on demand via :meth:`PostgresStorage.transaction` (a real
+``conn.transaction()`` block). Autocommit means a bare read never leaves an
+idle-in-transaction snapshot open, and never prematurely commits an in-flight
+write transaction it happens to be nested inside.
+
+Connections also set ``connect_timeout`` (unreachable host fails fast),
+``statement_timeout`` (pathological query is bounded) and
+``idle_in_transaction_session_timeout`` (a stuck transaction can't pin a
+connection forever) -- all configurable via ``POSTGRES_*`` settings.
 
 Embeddings are exchanged as pgvector text literals (``[1,2,3]``) and cast in
 SQL (``%s::vector``). This keeps the backend working with only ``psycopg``
@@ -15,13 +25,20 @@ installed and sidesteps the extension-OID lookup ordering that
 
 import json
 import logging
+import math
 import threading
 from collections.abc import Generator
 from contextlib import contextmanager
-from datetime import date, datetime
+from datetime import datetime
 from typing import Any
 
-from librarian.config import POSTGRES_DSN, POSTGRES_SCHEMA
+from librarian.config import (
+    POSTGRES_CONNECT_TIMEOUT,
+    POSTGRES_DSN,
+    POSTGRES_IDLE_TX_TIMEOUT_MS,
+    POSTGRES_SCHEMA,
+    POSTGRES_STATEMENT_TIMEOUT_MS,
+)
 from librarian.types import AssetType, Document
 
 logger = logging.getLogger(__name__)
@@ -43,8 +60,22 @@ def _require_psycopg() -> Any:
 
 
 def vector_literal(embedding: list[float]) -> str:
-    """Render an embedding as a pgvector text literal (``[0.1,0.2,...]``)."""
-    return "[" + ",".join(repr(float(x)) for x in embedding) + "]"
+    """Render an embedding as a pgvector text literal (``[0.1,0.2,...]``).
+
+    Raises ``ValueError`` on non-finite components: pgvector rejects ``inf`` /
+    ``nan`` at insert time, so we fail loudly and uniformly here rather than
+    diverging from sqlite-vec (which would store the raw bits silently).
+    """
+    parts: list[str] = []
+    for x in embedding:
+        value = float(x)
+        if not math.isfinite(value):
+            raise ValueError(
+                "Embedding contains a non-finite value (inf/nan); pgvector "
+                "rejects these. Check the embedding model output."
+            )
+        parts.append(repr(value))
+    return "[" + ",".join(parts) + "]"
 
 
 def parse_vector(value: Any) -> list[float] | None:
@@ -57,13 +88,6 @@ def parse_vector(value: Any) -> list[float] | None:
     if not text:
         return None
     return [float(x) for x in text.split(",")]
-
-
-def _json_default(value: Any) -> str:
-    """JSON fallback for date/datetime values from YAML frontmatter."""
-    if isinstance(value, (date, datetime)):
-        return value.isoformat()
-    return str(value)
 
 
 def _as_metadata(value: Any) -> dict[str, Any]:
@@ -87,15 +111,16 @@ class PostgresDatabase:
                 "Set POSTGRES_DSN (or DATABASE_URL)."
             )
         self.schema = schema or POSTGRES_SCHEMA
+        # Connections are thread-local (one per thread); psycopg connections are
+        # not shared across threads, so no application-level lock is required.
         self._local = threading.local()
-        self._lock = threading.RLock()
 
     # =========================================================================
     # Connection management
     # =========================================================================
 
     def _get_connection(self) -> Any:
-        """Get or create a thread-local psycopg connection pinned to the schema."""
+        """Get or create a thread-local autocommit connection pinned to the schema."""
         conn = getattr(self._local, "connection", None)
         if conn is not None and not conn.closed:
             return conn
@@ -104,26 +129,45 @@ class PostgresDatabase:
         from psycopg import sql
         from psycopg.rows import dict_row
 
-        conn = psycopg.connect(self.dsn, autocommit=False, row_factory=dict_row)
+        connect_kwargs: dict[str, Any] = {"autocommit": True, "row_factory": dict_row}
+        if POSTGRES_CONNECT_TIMEOUT > 0:
+            connect_kwargs["connect_timeout"] = POSTGRES_CONNECT_TIMEOUT
+
+        conn = psycopg.connect(self.dsn, **connect_kwargs)
         with conn.cursor() as cur:
             cur.execute(
                 sql.SQL("SET search_path TO {}, public").format(sql.Identifier(self.schema))
             )
-        conn.commit()
+            # Bound runaway queries and stuck transactions. ``0`` disables either.
+            cur.execute(
+                sql.SQL("SET statement_timeout = {}").format(
+                    sql.Literal(POSTGRES_STATEMENT_TIMEOUT_MS)
+                )
+            )
+            cur.execute(
+                sql.SQL("SET idle_in_transaction_session_timeout = {}").format(
+                    sql.Literal(POSTGRES_IDLE_TX_TIMEOUT_MS)
+                )
+            )
         self._local.connection = conn
         return conn
 
     @contextmanager
     def _connection(self) -> Generator[Any, None, None]:
-        """Context manager that commits on clean exit and rolls back on error."""
+        """Yield the thread-local connection for a (read-side) statement group.
+
+        The connection is in ``autocommit`` mode, so individual reads commit
+        immediately and never leave an idle transaction open. On error we roll
+        back defensively in case a transaction was opened by the caller. Write
+        atomicity is provided separately by ``PostgresStorage.transaction``.
+        """
         conn = self._get_connection()
         try:
             yield conn
         except Exception:
-            conn.rollback()
+            if not conn.closed:
+                conn.rollback()
             raise
-        else:
-            conn.commit()
 
     def close(self) -> None:
         """Close the current thread's connection, if any."""
@@ -190,13 +234,14 @@ class PostgresDatabase:
         start_ts = start_date.timestamp()
         end_ts = end_date.timestamp()
         with self._connection() as conn:
+            # Two index-friendly OR'd predicates rather than a CASE in the WHERE
+            # (which is non-sargable and forces a full scan). Postgres can plan
+            # each branch against an index on file_mtime / updated_at.
             rows = conn.execute(
                 """
                 SELECT id FROM documents
-                WHERE CASE
-                    WHEN file_mtime IS NOT NULL THEN file_mtime >= %s AND file_mtime < %s
-                    ELSE updated_at >= %s AND updated_at < %s
-                END
+                WHERE (file_mtime IS NOT NULL AND file_mtime >= %s AND file_mtime < %s)
+                   OR (file_mtime IS NULL AND updated_at >= %s AND updated_at < %s)
                 """,
                 (start_ts, end_ts, start_date, end_date),
             ).fetchall()
@@ -241,12 +286,22 @@ class PostgresDatabase:
             }
 
     def _sanitized_dsn(self) -> str:
-        """A display-safe DSN (password stripped) for stats/logging."""
+        """A display-safe DSN (password redacted) for stats/logging.
+
+        Handles every form psycopg accepts -- ``postgres://`` URLs, libpq keyword
+        DSNs (``host=... password=...``) and no-scheme forms -- by parsing rather
+        than string-splitting. If parsing is uncertain we redact the whole value
+        so a password can never leak through (e.g. via ``libr stats``).
+        """
         dsn = self.dsn or ""
-        if "@" in dsn and "://" in dsn:
-            scheme, rest = dsn.split("://", 1)
-            if "@" in rest:
-                creds, host = rest.split("@", 1)
-                user = creds.split(":", 1)[0]
-                return f"{scheme}://{user}:***@{host}"
-        return dsn
+        if not dsn:
+            return dsn
+        try:
+            from psycopg.conninfo import conninfo_to_dict, make_conninfo
+
+            params = conninfo_to_dict(dsn)
+            if params.get("password"):
+                params["password"] = "***"  # noqa: S105 - redaction, not a credential
+            return str(make_conninfo(**params))
+        except Exception:
+            return "***"

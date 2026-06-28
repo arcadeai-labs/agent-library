@@ -12,31 +12,77 @@ not semantic:
   the index in lock-step with ``chunks.content`` automatically);
 * ``cursor``/``metadata`` are ``JSONB``.
 
-Every statement is ``IF NOT EXISTS`` / ``ADD COLUMN IF NOT EXISTS``, so
-``migrate()`` is idempotent: re-running it on an up-to-date database is a no-op.
+Every table/index is created with ``IF NOT EXISTS``, so ``migrate()`` is
+idempotent on a fresh database: re-running it is a no-op. (There are no
+``ALTER TABLE ... ADD COLUMN`` steps yet, so an older table that predates a new
+column would not be upgraded in place -- add explicit ALTERs here when the shape
+next changes.)
 """
 
 import logging
+import re
 from typing import Any
 
 from librarian.config import (
     CODE_EMBEDDING_DIMENSION,
-    EMBEDDING_DIMENSION,
-    EMBEDDING_PROVIDER,
-    OPENAI_EMBEDDING_DIMENSION,
+    POSTGRES_FTS_LANGUAGE,
     VISION_EMBEDDING_DIMENSION,
+    get_effective_embedding_dimension,
 )
+from librarian.storage.schema_version import SchemaRebuildRequired
 
 logger = logging.getLogger(__name__)
 
 V14_SCHEMA_VERSION = 14
 
+# A regconfig embedded in DDL (the generated column) can't be a bound parameter,
+# so restrict it to a plain identifier to keep it injection-safe.
+_REGCONFIG_RE = re.compile(r"^[a-z_][a-z0-9_]*$")
 
-def effective_text_dimension() -> int:
-    """Text embedding dimension for the configured provider."""
-    if EMBEDDING_PROVIDER == "openai":
-        return OPENAI_EMBEDDING_DIMENSION
-    return EMBEDDING_DIMENSION
+
+def _fts_language() -> str:
+    lang = POSTGRES_FTS_LANGUAGE
+    if not _REGCONFIG_RE.match(lang):
+        raise ValueError(
+            f"Invalid POSTGRES_FTS_LANGUAGE {lang!r}; expected a text-search "
+            "config identifier such as 'english' or 'simple'."
+        )
+    return lang
+
+
+def _assert_vector_dim(cur: Any, schema: str, table: str, expected: int) -> None:
+    """Fail loudly if an existing ``embedding`` column's dimension drifted.
+
+    ``vector(dim)`` is fixed at create time and ``CREATE TABLE IF NOT EXISTS`` is
+    a no-op on re-run, so a later change to ``EMBEDDING_DIMENSION`` would
+    otherwise surface only as an opaque ``expected N dimensions, not M`` on the
+    next insert. pgvector stores the declared dimension directly in
+    ``atttypmod``, so we read it back and raise a clear rebuild-required error on
+    mismatch (mirroring the SQLite path's ``SchemaRebuildRequired``).
+    """
+    row = cur.execute(
+        """
+        SELECT a.atttypmod AS dim
+        FROM pg_attribute a
+        JOIN pg_class c ON a.attrelid = c.oid
+        JOIN pg_namespace n ON c.relnamespace = n.oid
+        WHERE n.nspname = %s AND c.relname = %s AND a.attname = 'embedding'
+          AND NOT a.attisdropped
+        """,
+        (schema, table),
+    ).fetchone()
+    if row is None:
+        return
+    actual = row["dim"] if isinstance(row, dict) else row[0]
+    # atttypmod is -1 for an unspecified typmod; only compare when declared.
+    if actual is not None and actual > 0 and actual != expected:
+        raise SchemaRebuildRequired(
+            f"Postgres table {schema}.{table}.embedding was created with "
+            f"vector({actual}) but the configured embedding dimension is now "
+            f"{expected}. pgvector columns can't be resized in place -- back up "
+            f"and rebuild the index (drop {schema}.{table} or the schema and "
+            f"re-ingest under the new dimension)."
+        )
 
 
 def migrate(conn: Any, schema: str = "public") -> None:
@@ -48,9 +94,10 @@ def migrate(conn: Any, schema: str = "public") -> None:
     """
     from psycopg import sql
 
-    text_dim = effective_text_dimension()
+    text_dim = get_effective_embedding_dimension()
     code_dim = CODE_EMBEDDING_DIMENSION
     vision_dim = VISION_EMBEDDING_DIMENSION
+    fts_lang = _fts_language()
 
     logger.info("Running v0.14 Postgres schema migration (schema=%s)", schema)
 
@@ -85,7 +132,7 @@ def migrate(conn: Any, schema: str = "public") -> None:
             "CREATE UNIQUE INDEX IF NOT EXISTS idx_documents_document_id ON documents(document_id)"
         )
         cur.execute(
-            """
+            f"""
             CREATE TABLE IF NOT EXISTS chunks (
                 id BIGSERIAL PRIMARY KEY,
                 document_id BIGINT NOT NULL REFERENCES documents(id) ON DELETE CASCADE,
@@ -104,7 +151,7 @@ def migrate(conn: Any, schema: str = "public") -> None:
                 document_source_uri TEXT,
                 chunk_source_uri TEXT,
                 content_tsv tsvector GENERATED ALWAYS AS
-                    (to_tsvector('english', content)) STORED
+                    (to_tsvector('{fts_lang}', content)) STORED
             )
             """
         )
@@ -139,6 +186,30 @@ def migrate(conn: Any, schema: str = "public") -> None:
                 embedding vector({vision_dim})
             )
             """
+        )
+
+        # If a table already existed with a different declared dimension, fail
+        # loudly now rather than on the next opaque %s::vector insert.
+        _assert_vector_dim(cur, schema, "chunk_embeddings", text_dim)
+        _assert_vector_dim(cur, schema, "vec_chunks_code", code_dim)
+        _assert_vector_dim(cur, schema, "vec_chunks_vision", vision_dim)
+
+        # ANN indexes for the cosine ``<=>`` searches. Without these, every
+        # ORDER BY embedding <=> ... is an exact, O(rows) sequential scan -- the
+        # exact cliff this backend exists to avoid at scale. HNSW trades a slower
+        # build + approximate recall for sublinear query time; ``vector_cosine_ops``
+        # matches the ``<=>`` operator used by PgVectorStore.
+        cur.execute(
+            "CREATE INDEX IF NOT EXISTS idx_chunk_embeddings_hnsw "
+            "ON chunk_embeddings USING hnsw (embedding vector_cosine_ops)"
+        )
+        cur.execute(
+            "CREATE INDEX IF NOT EXISTS idx_vec_chunks_code_hnsw "
+            "ON vec_chunks_code USING hnsw (embedding vector_cosine_ops)"
+        )
+        cur.execute(
+            "CREATE INDEX IF NOT EXISTS idx_vec_chunks_vision_hnsw "
+            "ON vec_chunks_vision USING hnsw (embedding vector_cosine_ops)"
         )
 
         cur.execute(

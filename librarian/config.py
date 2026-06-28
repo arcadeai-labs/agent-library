@@ -107,6 +107,18 @@ POSTGRES_DSN = os.getenv("POSTGRES_DSN") or os.getenv("DATABASE_URL")
 # multi-tenant deployments) can isolate their tables on a shared database.
 POSTGRES_SCHEMA = os.getenv("POSTGRES_SCHEMA", "public").strip()
 
+# Connection / query timeouts (Postgres only). These keep an unreachable host or
+# a pathological query from hanging a worker thread or pinning a server
+# connection indefinitely. ``0`` disables the corresponding server-side timeout.
+POSTGRES_CONNECT_TIMEOUT = safe_int(os.getenv("POSTGRES_CONNECT_TIMEOUT"), 10)
+POSTGRES_STATEMENT_TIMEOUT_MS = safe_int(os.getenv("POSTGRES_STATEMENT_TIMEOUT_MS"), 30_000)
+POSTGRES_IDLE_TX_TIMEOUT_MS = safe_int(os.getenv("POSTGRES_IDLE_TX_TIMEOUT_MS"), 60_000)
+
+# Text-search configuration (regconfig) used for the generated ``content_tsv``
+# column and the FTS query/headline functions. Pinned at table-creation time;
+# changing it on a populated database requires a schema rebuild.
+POSTGRES_FTS_LANGUAGE = os.getenv("POSTGRES_FTS_LANGUAGE", "english").strip()
+
 # =============================================================================
 # Text Embedding Configuration
 # =============================================================================

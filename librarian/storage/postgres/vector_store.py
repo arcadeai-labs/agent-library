@@ -115,6 +115,7 @@ class PgVectorStore:
                 FROM {table} ve
                 JOIN chunks c ON ve.chunk_id = c.id
                 JOIN documents d ON c.document_id = d.id
+                WHERE c.deleted_at IS NULL
                 ORDER BY ve.embedding <=> %s::vector
                 LIMIT %s
                 """,  # noqa: S608 - table is a fixed internal literal

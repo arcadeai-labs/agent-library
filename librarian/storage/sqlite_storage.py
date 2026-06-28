@@ -22,11 +22,13 @@ import logging
 import sqlite3
 from collections.abc import Iterator
 from contextlib import contextmanager
-from datetime import datetime
+from datetime import datetime, timezone
 
+from librarian.storage._common import iso as _iso
+from librarian.storage._common import json_default as _json_default
+from librarian.storage._common import modality_table as _modality_table
 from librarian.storage.database import (
     Database,
-    _json_default,
     deserialize_embedding,
     get_database,
     serialize_embedding,
@@ -36,23 +38,10 @@ from librarian.storage.migrate import migrate as migrate_schema
 from librarian.storage.protocols import SyncState
 from librarian.storage.vector_store import VectorStore
 from librarian.storage.write_models import PreparedDocument
-from librarian.types import EmbeddingModality
 
 logger = logging.getLogger(__name__)
 
 __all__ = ["SQLiteStorage", "get_storage"]
-
-
-def _modality_table(modality: EmbeddingModality) -> str:
-    if modality == EmbeddingModality.CODE:
-        return "vec_chunks_code"
-    if modality == EmbeddingModality.VISION:
-        return "vec_chunks_vision"
-    return "chunk_embeddings"
-
-
-def _iso(value: datetime | None) -> str | None:
-    return value.isoformat() if value is not None else None
 
 
 class SQLiteStorage:
@@ -337,7 +326,7 @@ class SQLiteStorage:
         self, conn: sqlite3.Connection, document_id: str, reason: str | None
     ) -> int:
         """Tombstone all chunks of a document. Returns the number tombstoned."""
-        now = datetime.now().isoformat()
+        now = datetime.now(timezone.utc).isoformat()
         cursor = conn.execute(
             """
             UPDATE chunks

@@ -11,6 +11,7 @@ query, giving forgiving plain-language matching without FTS5-specific escaping.
 
 import logging
 
+from librarian.config import POSTGRES_FTS_LANGUAGE
 from librarian.storage.fts_store import FTSSearchResult
 from librarian.storage.postgres.database import PostgresDatabase
 
@@ -38,10 +39,15 @@ class PgFTSStore:
         headline_opts = (
             f"StartSel=<mark>, StopSel=</mark>, MaxFragments=1, MaxWords={max_words}, MinWords=1"
         )
+        # The regconfig is passed as a bound parameter (cast to ::regconfig), so it
+        # can't be a SQL-injection vector even though it's configurable. It must
+        # match the language baked into the generated ``content_tsv`` column at
+        # migration time (see migrate.py / POSTGRES_FTS_LANGUAGE).
+        lang = POSTGRES_FTS_LANGUAGE
         with self.db._connection() as conn:
             rows = conn.execute(
                 f"""
-                WITH q AS (SELECT websearch_to_tsquery('english', %s) AS query)
+                WITH q AS (SELECT websearch_to_tsquery(%s::regconfig, %s) AS query)
                 SELECT
                     c.id AS chunk_id,
                     ts_rank_cd(c.content_tsv, q.query) AS rank,
@@ -50,15 +56,16 @@ class PgFTSStore:
                     c.heading_path AS heading_path,
                     d.path AS document_path,
                     d.asset_type AS asset_type,
-                    ts_headline('english', c.content, q.query, '{headline_opts}') AS snippet
+                    ts_headline(%s::regconfig, c.content, q.query, '{headline_opts}') AS snippet
                 FROM chunks c
                 JOIN documents d ON c.document_id = d.id
                 CROSS JOIN q
                 WHERE c.content_tsv @@ q.query
+                  AND c.deleted_at IS NULL
                 ORDER BY rank DESC
                 LIMIT %s
                 """,  # noqa: S608 - headline_opts is built from a validated int
-                (query, limit),
+                (lang, query, lang, limit),
             ).fetchall()
 
         return [
