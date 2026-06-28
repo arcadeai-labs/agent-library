@@ -3,14 +3,21 @@ PostgresDatabase -- connection management and read-side metadata access.
 
 Mirrors the read surface of :class:`librarian.storage.database.Database` (the
 SQLite metadata store) so the retrieval and MCP layers are substrate-agnostic.
-Connections are thread-local: each thread gets its own ``psycopg`` connection,
-so no application-level lock is needed (psycopg connections are not shared
-across threads). Every connection runs in ``autocommit`` mode and pins
-``search_path`` to the configured schema; explicit multi-statement atomicity is
-opened on demand via :meth:`PostgresStorage.transaction` (a real
-``conn.transaction()`` block). Autocommit means a bare read never leaves an
-idle-in-transaction snapshot open, and never prematurely commits an in-flight
-write transaction it happens to be nested inside.
+Connections come from a bounded :class:`psycopg_pool.ConnectionPool` (capped at
+``POSTGRES_POOL_MAX_SIZE``): a threaded MCP/HTTP server checks connections out
+of the pool for the duration of one operation rather than opening one per
+thread, so request fan-out can't drift toward the server's ``max_connections``.
+Every pooled connection runs in ``autocommit`` mode and pins ``search_path`` to
+the configured schema; explicit multi-statement atomicity is opened on demand
+via :meth:`transaction` (a real ``conn.transaction()`` block). Autocommit means
+a bare read never leaves an idle-in-transaction snapshot open, and never
+prematurely commits an in-flight write transaction it happens to be nested
+inside.
+
+During a :meth:`transaction` the checked-out connection is parked on a
+thread-local so the reads/writes issued inside the ``with`` block all join that
+one transaction (the atomicity guarantee) instead of borrowing a second,
+independent connection from the pool.
 
 Connections also set ``connect_timeout`` (unreachable host fails fast),
 ``statement_timeout`` (pathological query is bounded) and
@@ -36,6 +43,9 @@ from librarian.config import (
     POSTGRES_CONNECT_TIMEOUT,
     POSTGRES_DSN,
     POSTGRES_IDLE_TX_TIMEOUT_MS,
+    POSTGRES_POOL_MAX_SIZE,
+    POSTGRES_POOL_MIN_SIZE,
+    POSTGRES_POOL_TIMEOUT,
     POSTGRES_SCHEMA,
     POSTGRES_STATEMENT_TIMEOUT_MS,
 )
@@ -46,17 +56,17 @@ logger = logging.getLogger(__name__)
 __all__ = ["PostgresDatabase", "vector_literal"]
 
 
-def _require_psycopg() -> Any:
-    """Import psycopg, raising a clear error if the ``postgres`` extra is absent."""
+def _require_psycopg_pool() -> Any:
+    """Import psycopg_pool, raising a clear error if the ``postgres`` extra is absent."""
     try:
-        import psycopg
+        import psycopg_pool
     except ImportError as e:  # pragma: no cover - exercised only without the extra
         raise ImportError(
             "PostgresStorage requires the 'postgres' extra. Install it with:\n"
             "    uv pip install -e '.[postgres]'\n"
             "or set STORAGE_BACKEND=sqlite to use the default backend."
         ) from e
-    return psycopg
+    return psycopg_pool
 
 
 def vector_literal(embedding: list[float]) -> str:
@@ -111,29 +121,27 @@ class PostgresDatabase:
                 "Set POSTGRES_DSN (or DATABASE_URL)."
             )
         self.schema = schema or POSTGRES_SCHEMA
-        # Connections are thread-local (one per thread); psycopg connections are
-        # not shared across threads, so no application-level lock is required.
+        # The bounded pool is created lazily on first use (so constructing a
+        # PostgresDatabase never dials out). ``_local.txn_conn`` holds the
+        # connection checked out for the duration of an open transaction(), so
+        # reads issued inside that block join the same transaction instead of
+        # borrowing a second connection from the pool.
+        self._pool: Any = None
         self._local = threading.local()
 
     # =========================================================================
     # Connection management
     # =========================================================================
 
-    def _get_connection(self) -> Any:
-        """Get or create a thread-local autocommit connection pinned to the schema."""
-        conn = getattr(self._local, "connection", None)
-        if conn is not None and not conn.closed:
-            return conn
+    def _configure_connection(self, conn: Any) -> None:
+        """Pin search_path + timeouts on a freshly created pooled connection.
 
-        psycopg = _require_psycopg()
+        Run once per physical connection (psycopg_pool's ``configure`` hook), not
+        per checkout: these are session-level settings that persist for the
+        connection's lifetime.
+        """
         from psycopg import sql
-        from psycopg.rows import dict_row
 
-        connect_kwargs: dict[str, Any] = {"autocommit": True, "row_factory": dict_row}
-        if POSTGRES_CONNECT_TIMEOUT > 0:
-            connect_kwargs["connect_timeout"] = POSTGRES_CONNECT_TIMEOUT
-
-        conn = psycopg.connect(self.dsn, **connect_kwargs)
         with conn.cursor() as cur:
             cur.execute(
                 sql.SQL("SET search_path TO {}, public").format(sql.Identifier(self.schema))
@@ -149,32 +157,75 @@ class PostgresDatabase:
                     sql.Literal(POSTGRES_IDLE_TX_TIMEOUT_MS)
                 )
             )
-        self._local.connection = conn
-        return conn
+
+    def _get_pool(self) -> Any:
+        """Get or lazily create the bounded connection pool."""
+        if self._pool is not None and not self._pool.closed:
+            return self._pool
+
+        psycopg_pool = _require_psycopg_pool()
+        from psycopg.rows import dict_row
+
+        connect_kwargs: dict[str, Any] = {"autocommit": True, "row_factory": dict_row}
+        if POSTGRES_CONNECT_TIMEOUT > 0:
+            connect_kwargs["connect_timeout"] = POSTGRES_CONNECT_TIMEOUT
+
+        self._pool = psycopg_pool.ConnectionPool(
+            self.dsn,
+            min_size=POSTGRES_POOL_MIN_SIZE,
+            max_size=POSTGRES_POOL_MAX_SIZE,
+            timeout=POSTGRES_POOL_TIMEOUT,
+            kwargs=connect_kwargs,
+            configure=self._configure_connection,
+            open=True,
+        )
+        return self._pool
 
     @contextmanager
     def _connection(self) -> Generator[Any, None, None]:
-        """Yield the thread-local connection for a (read-side) statement group.
+        """Yield a connection for a (read-side) statement group.
 
-        The connection is in ``autocommit`` mode, so individual reads commit
-        immediately and never leave an idle transaction open. On error we roll
-        back defensively in case a transaction was opened by the caller. Write
-        atomicity is provided separately by ``PostgresStorage.transaction``.
+        Inside an open :meth:`transaction` this yields that transaction's
+        connection (so the read joins it without committing it). Otherwise it
+        borrows a connection from the pool for the duration of the ``with`` block
+        and returns it afterward. The connection is in ``autocommit`` mode, so
+        individual reads commit immediately and never leave an idle transaction
+        open.
         """
-        conn = self._get_connection()
-        try:
+        txn_conn = getattr(self._local, "txn_conn", None)
+        if txn_conn is not None:
+            # Join the in-flight transaction; its owner (transaction()) returns
+            # the connection to the pool on commit/rollback.
+            yield txn_conn
+            return
+
+        with self._get_pool().connection() as conn:
             yield conn
-        except Exception:
-            if not conn.closed:
-                conn.rollback()
-            raise
+
+    @contextmanager
+    def transaction(self) -> Generator[Any, None, None]:
+        """Check out one pooled connection and run a single atomic transaction.
+
+        Opens a real ``conn.transaction()`` block on the autocommit connection:
+        commits on clean exit, rolls back on exception. The connection is parked
+        on a thread-local for the duration so reads/writes issued inside the
+        block (e.g. ``get_sync_state``, ``write_upsert``) all run in this one
+        transaction and commit or roll back together. The pool reclaims the
+        connection when the block exits.
+        """
+        with self._get_pool().connection() as conn:
+            self._local.txn_conn = conn
+            try:
+                with conn.transaction():
+                    yield conn
+            finally:
+                self._local.txn_conn = None
 
     def close(self) -> None:
-        """Close the current thread's connection, if any."""
-        conn = getattr(self._local, "connection", None)
-        if conn is not None and not conn.closed:
-            conn.close()
-        self._local.connection = None
+        """Close the connection pool, if one was opened."""
+        if self._pool is not None and not self._pool.closed:
+            self._pool.close()
+        self._pool = None
 
     # =========================================================================
     # Document reads (MetadataStore protocol)
@@ -208,26 +259,33 @@ class PostgresDatabase:
         self,
         start_date: datetime | None = None,
         end_date: datetime | None = None,
+        limit: int | None = None,
+        offset: int = 0,
     ) -> list[Document]:
+        """List documents newest-first, optionally windowed and paginated.
+
+        Mirrors :meth:`librarian.storage.database.Database.list_documents`: the
+        same ``updated_at DESC, id DESC`` order and ``limit``/``offset`` bounds,
+        so a paginated read returns the same window on either substrate.
+        """
+        clauses: list[str] = []
+        params: list[Any] = []
+        if start_date:
+            clauses.append("updated_at >= %s")
+            params.append(start_date)
+        if end_date:
+            clauses.append("updated_at < %s")
+            params.append(end_date)
+        sql = "SELECT * FROM documents"
+        if clauses:
+            sql += " WHERE " + " AND ".join(clauses)
+        sql += " ORDER BY updated_at DESC, id DESC"
+        if limit is not None:
+            sql += " LIMIT %s OFFSET %s"
+            params.extend((limit, offset))
+
         with self._connection() as conn:
-            if start_date and end_date:
-                rows = conn.execute(
-                    "SELECT * FROM documents WHERE updated_at >= %s AND updated_at < %s "
-                    "ORDER BY updated_at DESC",
-                    (start_date, end_date),
-                ).fetchall()
-            elif start_date:
-                rows = conn.execute(
-                    "SELECT * FROM documents WHERE updated_at >= %s ORDER BY updated_at DESC",
-                    (start_date,),
-                ).fetchall()
-            elif end_date:
-                rows = conn.execute(
-                    "SELECT * FROM documents WHERE updated_at < %s ORDER BY updated_at DESC",
-                    (end_date,),
-                ).fetchall()
-            else:
-                rows = conn.execute("SELECT * FROM documents ORDER BY updated_at DESC").fetchall()
+            rows = conn.execute(sql, params).fetchall()
             return [self._row_to_document(row) for row in rows]
 
     def get_document_ids_in_timerange(self, start_date: datetime, end_date: datetime) -> list[int]:

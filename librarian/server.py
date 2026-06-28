@@ -52,7 +52,6 @@ from librarian.sources.ignore import (
     normalize_force_include,
     should_skip_file,
 )
-from librarian.storage.database import get_database
 from librarian.storage.factory import get_metadata_store, get_storage
 from librarian.tool_outputs import (
     AddOutput,
@@ -575,23 +574,33 @@ async def add_to_library(
         logger.warning("Full indexing failed, storing without embeddings: %s", e)
 
         try:
-            db = get_database()
+            from librarian import ids
             from librarian.processing.parsers.md import MarkdownParser
-            from librarian.types import Document
+            from librarian.storage.write_models import PreparedDocument
+            from librarian.types import AssetType
 
             parser = MarkdownParser()
             parsed = parser.parse_file(file_path)
             file_mtime = file_path.stat().st_mtime
 
-            doc = Document(
-                id=None,
+            # Store the document row (no chunks/embeddings) through the storage
+            # factory so the fallback honors STORAGE_BACKEND instead of always
+            # writing to SQLite. The deterministic id + path match the local-file
+            # connector's, so a later successful re-index overwrites in place.
+            prepared = PreparedDocument(
+                document_id=ids.document_id("local_file", "file", str(file_path)),
                 path=str(file_path),
                 title=parsed.title,
                 content=parsed.content,
                 metadata=parsed.metadata,
+                asset_type=AssetType.TEXT,
+                document_size=len(parsed.content),
                 file_mtime=file_mtime,
+                chunks=[],
             )
-            db.insert_document(doc)
+            storage = get_storage()
+            with storage.transaction() as conn:
+                storage.write_upsert(conn, prepared)
 
             return AddOutput(
                 status="stored_partial",
@@ -1016,9 +1025,9 @@ async def remove_from_library(
     By default, this only removes from the search index (the file
     remains on disk). Set delete_file=True to permanently delete.
     """
-    db = get_database()
-
-    deleted = db.delete_document_by_path(path)
+    # Route through the storage factory so removal honors STORAGE_BACKEND
+    # (a Postgres deployment must delete from Postgres, not a stray SQLite file).
+    deleted = get_storage().delete_document_by_path(path)
 
     result: RemoveOutput = {
         "path": path,
@@ -1083,7 +1092,9 @@ async def list_library_contents(
     and when it was added/updated.
     """
     db = get_metadata_store()
-    documents = db.list_documents()[:limit]
+    # Bound the read at the query (LIMIT) rather than slicing in Python, so the
+    # full content/metadata of every other document is never loaded.
+    documents = db.list_documents(limit=limit)
 
     return [
         DocumentSummary(

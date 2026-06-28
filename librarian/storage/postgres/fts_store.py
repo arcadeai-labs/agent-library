@@ -57,11 +57,10 @@ class PgFTSStore:
                     d.path AS document_path,
                     d.asset_type AS asset_type,
                     ts_headline(%s::regconfig, c.content, q.query, '{headline_opts}') AS snippet
-                FROM chunks c
+                FROM chunks_live c
                 JOIN documents d ON c.document_id = d.id
                 CROSS JOIN q
                 WHERE c.content_tsv @@ q.query
-                  AND c.deleted_at IS NULL
                 ORDER BY rank DESC
                 LIMIT %s
                 """,  # noqa: S608 - headline_opts is built from a validated int
