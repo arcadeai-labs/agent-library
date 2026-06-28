@@ -73,8 +73,12 @@ vision = [
     "transformers>=4.30.0",
     "torchvision>=0.15.0",
 ]
+vlm = [
+    "openai>=1.0.0",
+    "anthropic>=0.40.0",
+]
 all = [
-    "agent-library[code,pdf,ocr,vision,postgres]",
+    "agent-library[code,pdf,ocr,vision,vlm,postgres]",
 ]
 evals = [
     "arcade-mcp[evals]>=1.14.0",

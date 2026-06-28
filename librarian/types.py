@@ -184,6 +184,9 @@ class TextChunk:
     end_char: int
     heading_path: str | None = None
     metadata: dict[str, Any] | None = None
+    # Per-chunk type-specific metadata persisted to ``chunks.modality_data``
+    # (e.g. ``{"processing_status": "failed"}`` for a VLM caption that errored).
+    modality_data: dict[str, Any] | None = None
 
 
 # =============================================================================

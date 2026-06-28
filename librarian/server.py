@@ -901,6 +901,7 @@ async def search_library(
                 chunk_index=extra.get("chunk_index"),
                 document_size=extra.get("document_size"),
                 source_created_at=extra.get("source_created_at"),
+                modality_data=extra.get("modality_data"),
             )
         )
     return hits

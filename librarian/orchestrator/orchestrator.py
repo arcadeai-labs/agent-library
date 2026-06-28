@@ -19,8 +19,9 @@ from datetime import datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
+from librarian import config as _config
 from librarian import ids
-from librarian.config import ENABLE_CODE_EMBEDDINGS, ENABLE_VISION_EMBEDDINGS
+from librarian.config import ENABLE_CODE_EMBEDDINGS
 from librarian.connectors.base import (
     Connector,
     DocumentSoftDelete,
@@ -28,11 +29,21 @@ from librarian.connectors.base import (
 )
 from librarian.connectors.local_file import LocalFileConnector
 from librarian.processing.embed import get_embedder, get_embedder_for_modality
-from librarian.processing.parsers.base import FileReadError, FileReadTimeoutError
+from librarian.processing.parsers.base import (
+    BaseParser,
+    FileReadError,
+    FileReadTimeoutError,
+    safe_read_bytes,
+)
 from librarian.processing.parsers.registry import get_parser_for_file
 from librarian.processing.transform.chunker import Chunker, ChunkingStrategy
 from librarian.processing.transform.code import CodeChunker, chunk_code_by_blocks
 from librarian.processing.transform.pdf import PDFChunker
+from librarian.processing.vision import (
+    BaseVisionDescriber,
+    get_vision_describer,
+    guess_image_mime,
+)
 from librarian.storage.factory import get_storage
 from librarian.storage.protocols import SyncState
 from librarian.storage.write_models import PreparedChunk, PreparedDocument
@@ -66,9 +77,12 @@ class Orchestrator:
         self,
         storage: "Storage | None" = None,
         embedder: Any = None,
+        vision_describer: BaseVisionDescriber | None = None,
     ) -> None:
         self.storage: Storage = storage or get_storage()
         self._embedder = embedder
+        self._vision_describer = vision_describer
+        self._vision_describer_loaded = vision_describer is not None
         self._text_chunker = Chunker(strategy=ChunkingStrategy.HEADERS)
         self._code_chunker = CodeChunker()
         self._pdf_chunker = PDFChunker()
@@ -262,6 +276,7 @@ class Orchestrator:
                 modality=modality,
                 embedding=embedding,
                 model_version=model_version,
+                modality_data=chunk.modality_data,
             )
             for i, (chunk, embedding) in enumerate(zip(text_chunks, embeddings, strict=True))
         ]
@@ -307,6 +322,8 @@ class Orchestrator:
     def _parse(self, event: DocumentUpsert) -> tuple[ParsedDocument, AssetType]:
         path = Path(event.source_native_id)
         parser, asset_type = get_parser_for_file(path)
+        if asset_type == AssetType.IMAGE:
+            return self._parse_image(event, path, parser), AssetType.IMAGE
         if parser is None:
             # Unknown type: treat the raw text (if any) as a single plain document.
             raw = event.raw_content if isinstance(event.raw_content, str) else ""
@@ -326,6 +343,97 @@ class Orchestrator:
         else:
             parsed = parser.parse_file(path)
         return parsed, asset_type
+
+    # =========================================================================
+    # Image vision path (VLM-text; the single v0.14 image path)
+    # =========================================================================
+
+    def _get_vision_describer(self) -> BaseVisionDescriber | None:
+        """Return the (lazily-resolved) VLM describer, or ``None`` if unavailable."""
+        if not self._vision_describer_loaded:
+            self._vision_describer = get_vision_describer()
+            self._vision_describer_loaded = True
+        return self._vision_describer
+
+    def _parse_image(
+        self, event: DocumentUpsert, path: Path, parser: "BaseParser | None"
+    ) -> ParsedDocument:
+        """Turn an image into a text document.
+
+        With ``IMAGE_GENERATE_CAPTIONS`` on, a single VLM call produces the
+        description + transcribed text used as the chunk content (the failure
+        path records ``processing_status='failed'`` so ``libr reprocess`` can
+        retry). With the flag off, the image becomes a metadata-only chunk via
+        the PIL-based parser (or a minimal placeholder when PIL is absent).
+        """
+        if _config.IMAGE_GENERATE_CAPTIONS:
+            return self._describe_image(event, path)
+
+        title = event.title or path.stem
+        if parser is not None:
+            return parser.parse_file(path)
+        # No captions and no Pillow: still index the asset, minimally.
+        content = f"Image: {path.name}"
+        return ParsedDocument(
+            path=str(path),
+            title=title,
+            content=content,
+            metadata={"file_type": "image"},
+            sections=[],
+            raw_content=content,
+            asset_type=AssetType.IMAGE,
+            modality_data={"processing_status": "skipped"},
+        )
+
+    def _describe_image(self, event: DocumentUpsert, path: Path) -> ParsedDocument:
+        """Run the VLM on an image, recording success or a retryable failure."""
+        title = event.title or path.stem
+        describer = self._get_vision_describer()
+        if describer is None:
+            return self._image_doc(
+                path,
+                title,
+                "[image, processing failed]",
+                "failed",
+                error="no vision describer is configured",
+            )
+        try:
+            image_bytes = (
+                event.raw_content if isinstance(event.raw_content, bytes) else safe_read_bytes(path)
+            )
+            result = describer.describe(image_bytes, guess_image_mime(path.suffix))
+        except Exception as e:
+            logger.warning("VLM image description failed for %s: %s", path, e)
+            return self._image_doc(
+                path, title, "[image, processing failed]", "failed", error=str(e)
+            )
+
+        return self._image_doc(
+            path,
+            title,
+            result.content or f"Image: {path.name}",
+            "ok",
+            caption=result.description,
+            transcribed_text=result.transcribed_text,
+            vlm_model=describer.model_name,
+        )
+
+    @staticmethod
+    def _image_doc(
+        path: Path, title: str, content: str, status: str, **extra: Any
+    ) -> ParsedDocument:
+        """Build an image :class:`ParsedDocument` carrying its processing status."""
+        modality_data: dict[str, Any] = {"processing_status": status, **extra}
+        return ParsedDocument(
+            path=str(path),
+            title=title,
+            content=content,
+            metadata={"file_type": "image"},
+            sections=[],
+            raw_content=content,
+            asset_type=AssetType.IMAGE,
+            modality_data=modality_data,
+        )
 
     def _chunk_parsed(self, parsed: ParsedDocument, asset_type: AssetType) -> list[TextChunk]:
         if asset_type == AssetType.CODE:
@@ -359,6 +467,7 @@ class Orchestrator:
                     end_char=len(parsed.content),
                     heading_path=parsed.title,
                     metadata=parsed.metadata,
+                    modality_data=parsed.modality_data or None,
                 )
             ]
         return self._text_chunker.chunk_document(parsed)
@@ -370,8 +479,10 @@ class Orchestrator:
     def _determine_modality(self, asset_type: AssetType) -> EmbeddingModality:
         if asset_type == AssetType.CODE and ENABLE_CODE_EMBEDDINGS:
             return EmbeddingModality.CODE
-        if asset_type == AssetType.IMAGE and ENABLE_VISION_EMBEDDINGS:
-            return EmbeddingModality.VISION
+        # Images embed in the TEXT space via their VLM caption / OCR text. The
+        # CLIP-style VISION modality is retired as an active path in v0.14 (see
+        # issue #53); ``_embed_image_chunks`` / ``vec_chunks_vision`` are left in
+        # place but unused, for a possible v1.x re-introduction.
         return EmbeddingModality.TEXT
 
     def _embed(
