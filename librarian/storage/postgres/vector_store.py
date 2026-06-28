@@ -63,6 +63,7 @@ class PgVectorStore:
         query_embedding: list[float],
         limit: int = 10,
         min_similarity: float = 0.0,
+        include_deleted: bool = False,
     ) -> list[VectorSearchResult]:
         expected_dim = get_effective_embedding_dimension()
         if len(query_embedding) != expected_dim:
@@ -71,7 +72,9 @@ class PgVectorStore:
                 f"does not match expected {expected_dim}"
             )
             raise ValueError(msg)
-        return self._search_table("chunk_embeddings", query_embedding, limit, min_similarity)
+        return self._search_table(
+            "chunk_embeddings", query_embedding, limit, min_similarity, include_deleted
+        )
 
     def search_by_modality(
         self,
@@ -79,6 +82,7 @@ class PgVectorStore:
         modality: EmbeddingModality,
         limit: int = 10,
         min_similarity: float = 0.0,
+        include_deleted: bool = False,
     ) -> list[VectorSearchResult]:
         if not self._is_modality_enabled(modality):
             logger.warning("Modality %s is not enabled", modality.value)
@@ -91,7 +95,7 @@ class PgVectorStore:
             )
             raise ValueError(msg)
         table = self._table_for_modality(modality)
-        return self._search_table(table, query_embedding, limit, min_similarity)
+        return self._search_table(table, query_embedding, limit, min_similarity, include_deleted)
 
     def _search_table(
         self,
@@ -99,8 +103,10 @@ class PgVectorStore:
         query_embedding: list[float],
         limit: int,
         min_similarity: float,
+        include_deleted: bool = False,
     ) -> list[VectorSearchResult]:
         literal = vector_literal(query_embedding)
+        deleted_clause = "" if include_deleted else "AND c.deleted_at IS NULL"
         with self.db._connection() as conn:
             rows = conn.execute(
                 f"""
@@ -115,10 +121,10 @@ class PgVectorStore:
                 FROM {table} ve
                 JOIN chunks c ON ve.chunk_id = c.id
                 JOIN documents d ON c.document_id = d.id
-                WHERE c.deleted_at IS NULL
+                WHERE TRUE {deleted_clause}
                 ORDER BY ve.embedding <=> %s::vector
                 LIMIT %s
-                """,  # noqa: S608 - table is a fixed internal literal
+                """,  # noqa: S608 - table/deleted_clause are fixed internal literals
                 (literal, literal, limit * 2),
             ).fetchall()
 

@@ -30,7 +30,7 @@ import threading
 from collections.abc import Generator
 from contextlib import contextmanager
 from datetime import datetime
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from librarian.config import (
     POSTGRES_CONNECT_TIMEOUT,
@@ -40,6 +40,9 @@ from librarian.config import (
     POSTGRES_STATEMENT_TIMEOUT_MS,
 )
 from librarian.types import AssetType, Document
+
+if TYPE_CHECKING:
+    from librarian.storage.protocols import ChunkContext
 
 logger = logging.getLogger(__name__)
 
@@ -270,6 +273,86 @@ class PostgresDatabase:
             }
             for row in rows
         }
+
+    def get_chunk_context(
+        self,
+        chunk_id: str,
+        before: int = 2,
+        after: int = 2,
+        include_deleted: bool = False,
+    ) -> "list[ChunkContext]":
+        """Postgres parity for :meth:`Database.get_chunk_context`.
+
+        Same window semantics as the SQLite backend: locate the anchor by public
+        ``chunk_id`` (TEXT, with an integer surrogate fallback for legacy rows),
+        then return the live chunks in ``[anchor - before, anchor + after]``
+        excluding the anchor, in source order. Soft-deleted neighbors are
+        included only when ``include_deleted`` is set.
+        """
+        from librarian.storage.protocols import ChunkContext
+
+        anchor = self._find_anchor_chunk(chunk_id)
+        if anchor is None:
+            return []
+        doc_pk, anchor_index = anchor
+
+        deleted_clause = "" if include_deleted else "AND c.deleted_at IS NULL"
+        with self._connection() as conn:
+            rows = conn.execute(
+                f"""
+                SELECT
+                    c.id AS internal_id,
+                    c.chunk_id AS chunk_id,
+                    c.document_id AS document_id,
+                    c.content AS content,
+                    c.heading_path AS heading_path,
+                    c.chunk_index AS chunk_index,
+                    c.asset_type AS asset_type,
+                    c.chunk_source_uri AS chunk_source_uri,
+                    c.deleted_at AS deleted_at,
+                    d.path AS document_path
+                FROM chunks c
+                JOIN documents d ON c.document_id = d.id
+                WHERE c.document_id = %s
+                    AND c.chunk_index BETWEEN %s AND %s
+                    AND c.chunk_index != %s
+                    {deleted_clause}
+                ORDER BY c.chunk_index ASC
+                """,  # noqa: S608 - deleted_clause is a fixed internal literal
+                (doc_pk, anchor_index - before, anchor_index + after, anchor_index),
+            ).fetchall()
+
+        return [
+            ChunkContext(
+                chunk_id=row["chunk_id"],
+                internal_id=row["internal_id"],
+                document_id=row["document_id"],
+                document_path=row["document_path"],
+                content=row["content"],
+                heading_path=row["heading_path"],
+                chunk_index=row["chunk_index"],
+                asset_type=row["asset_type"] or AssetType.TEXT.value,
+                chunk_source_uri=row["chunk_source_uri"],
+                deleted_at=row["deleted_at"],
+            )
+            for row in rows
+        ]
+
+    def _find_anchor_chunk(self, chunk_id: str) -> tuple[int, int] | None:
+        """Resolve ``chunk_id`` to its ``(document_id, chunk_index)`` or ``None``."""
+        with self._connection() as conn:
+            row = conn.execute(
+                "SELECT document_id, chunk_index FROM chunks WHERE chunk_id = %s",
+                (chunk_id,),
+            ).fetchone()
+            if row is None and chunk_id.isdigit():
+                row = conn.execute(
+                    "SELECT document_id, chunk_index FROM chunks WHERE id = %s",
+                    (int(chunk_id),),
+                ).fetchone()
+        if row is None:
+            return None
+        return row["document_id"], row["chunk_index"]
 
     def get_stats(self) -> dict[str, Any]:
         with self._connection() as conn:
