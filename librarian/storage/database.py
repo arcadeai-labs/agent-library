@@ -14,7 +14,7 @@ import warnings
 from collections.abc import Generator
 from contextlib import contextmanager
 from datetime import datetime
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import sqlite_vec
 
@@ -27,6 +27,9 @@ from librarian.config import (
 from librarian.storage._common import json_default as _json_default
 from librarian.storage.migrations import run_migrations
 from librarian.types import AssetType, Chunk, Document, EmbeddingModality
+
+if TYPE_CHECKING:
+    from librarian.storage.protocols import ChunkContext
 
 logger = logging.getLogger(__name__)
 
@@ -433,6 +436,90 @@ class Database:
             }
             for row in rows
         }
+
+    def get_chunk_context(
+        self,
+        chunk_id: str,
+        before: int = 2,
+        after: int = 2,
+        include_deleted: bool = False,
+    ) -> "list[ChunkContext]":
+        """Return the ``before`` chunks preceding and ``after`` following ``chunk_id``.
+
+        The anchor is located by its deterministic public ``chunk_id`` (TEXT);
+        legacy rows with a null public id fall back to matching the integer
+        surrogate (``chunks.id``) when ``chunk_id`` is all digits. Neighbors are
+        the chunks in the same document whose ``chunk_index`` falls in
+        ``[anchor - before, anchor + after]`` excluding the anchor itself,
+        returned in source order. At most ``before + after`` rows come back
+        (fewer at document boundaries). Soft-deleted neighbors are excluded
+        unless ``include_deleted`` is set; the anchor lookup ignores deletion so
+        a tombstoned chunk can still be expanded.
+        """
+        from librarian.storage.protocols import ChunkContext
+
+        anchor = self._find_anchor_chunk(chunk_id)
+        if anchor is None:
+            return []
+        doc_pk, anchor_index = anchor
+
+        deleted_clause = "" if include_deleted else "AND c.deleted_at IS NULL"
+        with self._connection() as conn:
+            rows = conn.execute(
+                f"""
+                SELECT
+                    c.id AS internal_id,
+                    c.chunk_id AS chunk_id,
+                    c.document_id AS document_id,
+                    c.content AS content,
+                    c.heading_path AS heading_path,
+                    c.chunk_index AS chunk_index,
+                    c.asset_type AS asset_type,
+                    c.chunk_source_uri AS chunk_source_uri,
+                    c.deleted_at AS deleted_at,
+                    d.path AS document_path
+                FROM chunks c
+                JOIN documents d ON c.document_id = d.id
+                WHERE c.document_id = ?
+                    AND c.chunk_index BETWEEN ? AND ?
+                    AND c.chunk_index != ?
+                    {deleted_clause}
+                ORDER BY c.chunk_index ASC
+                """,  # noqa: S608 - deleted_clause is a fixed internal literal
+                (doc_pk, anchor_index - before, anchor_index + after, anchor_index),
+            ).fetchall()
+
+        return [
+            ChunkContext(
+                chunk_id=row["chunk_id"],
+                internal_id=row["internal_id"],
+                document_id=row["document_id"],
+                document_path=row["document_path"],
+                content=row["content"],
+                heading_path=row["heading_path"],
+                chunk_index=row["chunk_index"],
+                asset_type=row["asset_type"] or AssetType.TEXT.value,
+                chunk_source_uri=row["chunk_source_uri"],
+                deleted_at=row["deleted_at"],
+            )
+            for row in rows
+        ]
+
+    def _find_anchor_chunk(self, chunk_id: str) -> tuple[int, int] | None:
+        """Resolve ``chunk_id`` to its ``(document_id, chunk_index)`` or ``None``."""
+        with self._connection() as conn:
+            row = conn.execute(
+                "SELECT document_id, chunk_index FROM chunks WHERE chunk_id = ?",
+                (chunk_id,),
+            ).fetchone()
+            if row is None and chunk_id.isdigit():
+                row = conn.execute(
+                    "SELECT document_id, chunk_index FROM chunks WHERE id = ?",
+                    (int(chunk_id),),
+                ).fetchone()
+        if row is None:
+            return None
+        return row["document_id"], row["chunk_index"]
 
     def delete_document(self, doc_id: int) -> None:
         """

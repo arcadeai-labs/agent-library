@@ -50,6 +50,7 @@ class FTSStore:
         query: str,
         limit: int = 10,
         snippet_length: int = 64,
+        include_deleted: bool = False,
     ) -> list[FTSSearchResult]:
         """
         Search for chunks matching the query using full-text search.
@@ -58,6 +59,8 @@ class FTSStore:
             query: The search query (supports FTS5 query syntax).
             limit: Maximum number of results to return.
             snippet_length: Length of snippet to return.
+            include_deleted: When True, soft-deleted chunks are included; by
+                default they are filtered out.
 
         Returns:
             List of search results ordered by relevance (best match first).
@@ -68,10 +71,11 @@ class FTSStore:
         # Escape special FTS5 characters in the query for simple searches
         # Users can still use FTS5 syntax by quoting terms
         safe_query = self._prepare_query(query)
+        deleted_clause = "" if include_deleted else "AND c.deleted_at IS NULL"
 
         with self.db._connection() as conn:
             rows = conn.execute(
-                """
+                f"""
                 SELECT
                     c.id as chunk_id,
                     bm25(chunks_fts) as rank,
@@ -85,10 +89,10 @@ class FTSStore:
                 JOIN chunks c ON chunks_fts.rowid = c.id
                 JOIN documents d ON c.document_id = d.id
                 WHERE chunks_fts MATCH ?
-                    AND c.deleted_at IS NULL
+                    {deleted_clause}
                 ORDER BY rank
                 LIMIT ?
-                """,
+                """,  # noqa: S608 - deleted_clause is a fixed internal literal
                 (snippet_length, safe_query, limit),
             ).fetchall()
 

@@ -118,6 +118,7 @@ class VectorStore:
         query_embedding: list[float],
         limit: int = 10,
         min_similarity: float = 0.0,
+        include_deleted: bool = False,
     ) -> list[VectorSearchResult]:
         """
         Search for similar chunks using vector similarity.
@@ -126,6 +127,8 @@ class VectorStore:
             query_embedding: The query embedding vector.
             limit: Maximum number of results to return.
             min_similarity: Minimum similarity score (0-1) to include.
+            include_deleted: When True, soft-deleted (tombstoned) chunks are
+                included; by default they are filtered out.
 
         Returns:
             List of search results ordered by similarity (most similar first).
@@ -139,12 +142,13 @@ class VectorStore:
             raise ValueError(msg)
 
         query_blob = serialize_embedding(query_embedding)
+        deleted_clause = "" if include_deleted else "AND c.deleted_at IS NULL"
 
         with self.db._connection() as conn:
             # sqlite-vec uses distance (lower is more similar)
             # We convert to similarity for easier understanding
             rows = conn.execute(
-                """
+                f"""
                 SELECT
                     ce.chunk_id,
                     ce.distance,
@@ -158,9 +162,9 @@ class VectorStore:
                 JOIN documents d ON c.document_id = d.id
                 WHERE ce.embedding MATCH ?
                     AND k = ?
-                    AND c.deleted_at IS NULL
+                    {deleted_clause}
                 ORDER BY ce.distance ASC
-                """,
+                """,  # noqa: S608 - deleted_clause is a fixed internal literal
                 (query_blob, limit * 2),  # Get extra for filtering
             ).fetchall()
 
@@ -215,6 +219,7 @@ class VectorStore:
         modality: EmbeddingModality,
         limit: int = 10,
         min_similarity: float = 0.0,
+        include_deleted: bool = False,
     ) -> list[VectorSearchResult]:
         """
         Search a specific modality's vector table.
@@ -224,6 +229,7 @@ class VectorStore:
             modality: The embedding modality to search (TEXT, CODE, VISION).
             limit: Maximum number of results to return.
             min_similarity: Minimum similarity score (0-1) to include.
+            include_deleted: When True, soft-deleted chunks are included.
 
         Returns:
             List of search results ordered by similarity.
@@ -245,6 +251,7 @@ class VectorStore:
 
         table = self._get_table_for_modality(modality)
         query_blob = serialize_embedding(query_embedding)
+        deleted_clause = "" if include_deleted else "AND c.deleted_at IS NULL"
 
         with self.db._connection() as conn:
             rows = conn.execute(
@@ -262,7 +269,7 @@ class VectorStore:
                 JOIN documents d ON c.document_id = d.id
                 WHERE ve.embedding MATCH ?
                     AND k = ?
-                    AND c.deleted_at IS NULL
+                    {deleted_clause}
                 ORDER BY ve.distance ASC
                 """,  # noqa: S608
                 (query_blob, limit * 2),

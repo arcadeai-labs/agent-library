@@ -106,6 +106,23 @@ class SearchHit(TypedDict):
     source_created_at: str | None
 
 
+class ContextChunk(TypedDict):
+    """One neighbor chunk returned by ``expand_context``.
+
+    Same identity/shape as a search hit's chunk, minus the relevance score:
+    these are positional neighbors, not ranked matches.
+    """
+
+    chunk_id: str  # deterministic hash (v0.14); falls back to the surrogate id as str
+    document_id: int
+    document_path: str
+    content: str
+    heading_path: str | None
+    chunk_index: int
+    asset_type: str
+    chunk_source_uri: str | None
+
+
 class _ReadOutputRequired(TypedDict):
     id: int | None
     path: str

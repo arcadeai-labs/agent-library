@@ -20,6 +20,7 @@ the skip-dirs / unsupported-extension / hidden-file baseline.
 
 import logging
 from collections.abc import AsyncIterator
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -187,4 +188,20 @@ class LocalFileConnector(Connector):
             raw_content=raw_content,
             mimetype=path.suffix.lstrip("."),
             metadata={"file_mtime": mtime},
+            source_created_at=self._source_created_at(path, mtime),
         )
+
+    @staticmethod
+    def _source_created_at(path: Path, mtime: float) -> datetime:
+        """Best-effort file creation timestamp (UTC).
+
+        Uses the filesystem birth time where the platform exposes it
+        (``st_birthtime`` on macOS/BSD), otherwise falls back to the modification
+        time so the column is always populated for file-sourced documents.
+        """
+        try:
+            stat = path.stat()
+        except OSError:
+            return datetime.fromtimestamp(mtime, tz=timezone.utc)
+        created_ts = getattr(stat, "st_birthtime", None) or stat.st_mtime
+        return datetime.fromtimestamp(created_ts, tz=timezone.utc)

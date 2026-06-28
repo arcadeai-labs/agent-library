@@ -31,6 +31,7 @@ class PgFTSStore:
         query: str,
         limit: int = 10,
         snippet_length: int = 64,
+        include_deleted: bool = False,
     ) -> list[FTSSearchResult]:
         if not query.strip():
             return []
@@ -39,6 +40,7 @@ class PgFTSStore:
         headline_opts = (
             f"StartSel=<mark>, StopSel=</mark>, MaxFragments=1, MaxWords={max_words}, MinWords=1"
         )
+        deleted_clause = "" if include_deleted else "AND c.deleted_at IS NULL"
         # The regconfig is passed as a bound parameter (cast to ::regconfig), so it
         # can't be a SQL-injection vector even though it's configurable. It must
         # match the language baked into the generated ``content_tsv`` column at
@@ -61,10 +63,10 @@ class PgFTSStore:
                 JOIN documents d ON c.document_id = d.id
                 CROSS JOIN q
                 WHERE c.content_tsv @@ q.query
-                  AND c.deleted_at IS NULL
+                  {deleted_clause}
                 ORDER BY rank DESC
                 LIMIT %s
-                """,  # noqa: S608 - headline_opts is built from a validated int
+                """,  # noqa: S608 - headline_opts/deleted_clause are fixed internal literals
                 (lang, query, lang, limit),
             ).fetchall()
 
