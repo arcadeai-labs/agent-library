@@ -42,9 +42,18 @@ def backup_database(db_path: Path) -> Path:
 def recreate_empty(db_path: Path) -> None:
     """Delete ``db_path`` and recreate it empty under the current schema."""
     from librarian.storage import database as db_module
+    from librarian.storage import sqlite_storage as sqlite_storage_module
     from librarian.storage.database import get_database
     from librarian.storage.sqlite_storage import SQLiteStorage
 
+    sqlite_storage = getattr(sqlite_storage_module, "_storage_instance", None)
+    if sqlite_storage is not None:
+        sqlite_storage.database.close()
+    sqlite_storage_module._storage_instance = None
+
+    db = getattr(db_module, "_db_instance", None)
+    if db is not None:
+        db.close()
     db_module._db_instance = None
     if db_path.exists():
         db_path.unlink()

@@ -267,9 +267,9 @@ def _get_source_doc_count(source: dict) -> int:
     """Get count of indexed docs for a source."""
     cfg = _get_config()
     cfg["ensure_directories"]()
-    from librarian.storage.database import get_database
+    from librarian.storage.factory import get_metadata_store
 
-    db = get_database()
+    db = get_metadata_store()
     documents = db.list_documents()
     source_path = source["path"]
     return sum(1 for d in documents if d.path.startswith(source_path))
@@ -365,6 +365,64 @@ def _reindex_sources(sources: list[dict[str, Any]], verbose: bool = False) -> tu
                         rprint(f"    [green]+[/green] {file_info.get('path', '')}")
 
     return total_indexed, total_errors
+
+
+def _index_registered_source(
+    source: dict[str, Any], source_path: Path, verbose: bool = False
+) -> None:
+    """Index an already-registered source without modifying the source registry."""
+    from librarian.server import index_directory_to_library as server_ingest
+
+    if source.get("is_file", source_path.is_file()):
+        rprint("[cyan]Indexing file...[/cyan]")
+        try:
+            result = _index_path(source_path, verbose)
+        except Exception as e:
+            rprint(f"[red]Error indexing:[/red] {e}")
+            raise typer.Exit(1) from None
+
+        rprint(
+            Panel(
+                f"[green]Source indexed![/green]\n\n"
+                f"Name: [cyan]{source.get('name', source_path.name)}[/cyan]\n"
+                f"Path: [blue]{source_path}[/blue]\n"
+                f"Chunks: [yellow]{result.get('chunks', 0)}[/yellow]",
+                title="Source Indexed",
+            )
+        )
+        return
+
+    rprint("[cyan]Indexing directory...[/cyan]")
+    result = _run_async(
+        server_ingest(
+            context=None,  # type: ignore[arg-type]
+            directory=str(source_path),
+            include_ignored=bool(source.get("include_ignored", False)),
+            force_include=list(source.get("force_include") or []) or None,
+        )
+    )
+
+    errors = result.get("errors", [])
+    for err in errors:
+        rprint(f"  [red]Error:[/red] {err.get('path', '')}: {err.get('error', '')}")
+
+    skipped = result.get("skipped", 0)
+    summary = (
+        f"[green]Source indexed![/green]\n\n"
+        f"Name: [cyan]{source.get('name', source_path.name)}[/cyan]\n"
+        f"Path: [blue]{source_path}[/blue]\n"
+        f"Files found: [yellow]{result.get('total_files', 0)}[/yellow]\n"
+        f"Indexed: [cyan]{result.get('indexed', 0)}[/cyan]\n"
+        f"Updated: [cyan]{result.get('updated', 0)}[/cyan]"
+    )
+    if skipped:
+        summary += f"\nSkipped: [dim]{skipped}[/dim]"
+    if errors:
+        summary += f"\nErrors: [red]{len(errors)}[/red]"
+
+    rprint(Panel(summary, title="Source Indexed"))
+    if errors:
+        raise typer.Exit(1)
 
 
 def _confirm_rebuild(db_path: Path, *, no_backup: bool, confirm: bool) -> None:
@@ -636,6 +694,10 @@ def add_source(
     for existing in sources:
         if Path(existing["path"]).resolve() == source_path:
             rprint(f"[yellow]Source already registered:[/yellow] {source_path}")
+            if dry_run:
+                rprint("[dim]Dry run: would index the existing source.[/dim]")
+                return
+            _index_registered_source(existing, source_path, verbose)
             return
 
     is_file = source_path.is_file()
@@ -1149,9 +1211,9 @@ def docs_overview(ctx: typer.Context) -> None:
     cfg = _get_config()
     cfg["ensure_directories"]()
 
-    from librarian.storage.database import get_database
+    from librarian.storage.factory import get_metadata_store
 
-    db = get_database()
+    db = get_metadata_store()
     all_docs = db.list_documents()
 
     table = Table(title="Sources", show_header=True, header_style="bold cyan")
@@ -1184,9 +1246,9 @@ def docs_list(
     cfg = _get_config()
     cfg["ensure_directories"]()
 
-    from librarian.storage.database import get_database
+    from librarian.storage.factory import get_metadata_store
 
-    db = get_database()
+    db = get_metadata_store()
     documents = db.list_documents()
 
     if source:
@@ -1256,9 +1318,9 @@ def docs_search(
     cfg = _get_config()
     cfg["ensure_directories"]()
 
-    from librarian.storage.database import get_database
+    from librarian.storage.factory import get_metadata_store
 
-    db = get_database()
+    db = get_metadata_store()
     documents = db.list_documents()
 
     query_lower = query.lower()
@@ -1390,9 +1452,9 @@ def search_cmd(
     if timeframe and results:
         start_dt, end_dt = _get_timeframe_bounds(timeframe)
         filtered = []
-        from librarian.storage.database import get_database
+        from librarian.storage.factory import get_metadata_store
 
-        db = get_database()
+        db = get_metadata_store()
         for r in results:
             doc = db.get_document_by_path(r.get("document_path", ""))
             if doc and doc.updated_at:
@@ -1400,6 +1462,8 @@ def search_cmd(
                     doc_dt = datetime.fromisoformat(doc.updated_at.replace("Z", "+00:00"))
                 else:
                     doc_dt = doc.updated_at
+                if doc_dt.tzinfo is not None:
+                    doc_dt = doc_dt.astimezone().replace(tzinfo=None)
                 if start_dt <= doc_dt <= end_dt:
                     filtered.append(r)
         results = filtered

@@ -193,6 +193,18 @@ def clean_db(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Generator[Path,
     """Create a clean temporary database for each test."""
     from librarian import config as config_module
     from librarian.storage import database as db_module
+    from librarian.storage import sqlite_storage as sqlite_storage_module
+
+    def close_global_storage() -> None:
+        sqlite_storage = getattr(sqlite_storage_module, "_storage_instance", None)
+        if sqlite_storage is not None:
+            sqlite_storage.database.close()
+        sqlite_storage_module._storage_instance = None
+
+        db = getattr(db_module, "_db_instance", None)
+        if db is not None:
+            db.close()
+        db_module._db_instance = None
 
     db_path = tmp_path / "test.db"
     monkeypatch.setattr(config_module, "DATABASE_PATH", str(db_path))
@@ -201,13 +213,14 @@ def clean_db(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Generator[Path,
     # shares the global /tmp database (and its stale schema).
     monkeypatch.setattr(db_module, "DATABASE_PATH", str(db_path))
 
-    # Reset the global database instance
-    db_module._db_instance = None
+    # Reset the global database/storage instances. Closing matters on Windows,
+    # where an open sqlite connection prevents unlinking the temp DB file.
+    close_global_storage()
 
     yield db_path
 
     # Cleanup
-    db_module._db_instance = None
+    close_global_storage()
     if db_path.exists():
         db_path.unlink()
 

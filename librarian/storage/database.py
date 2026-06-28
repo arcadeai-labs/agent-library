@@ -13,18 +13,18 @@ import threading
 import warnings
 from collections.abc import Generator
 from contextlib import contextmanager
-from datetime import date, datetime
+from datetime import datetime
 from typing import Any
 
 import sqlite_vec
 
 from librarian.config import (
     DATABASE_PATH,
-    EMBEDDING_DIMENSION,
     EMBEDDING_PROVIDER,
-    OPENAI_EMBEDDING_DIMENSION,
     ensure_directories,
+    get_effective_embedding_dimension,
 )
+from librarian.storage._common import json_default as _json_default
 from librarian.storage.migrations import run_migrations
 from librarian.types import AssetType, Chunk, Document, EmbeddingModality
 
@@ -47,26 +47,6 @@ def _warn_deprecated_mutator(method: str) -> None:
         DeprecationWarning,
         stacklevel=3,
     )
-
-
-def _json_default(value: Any) -> str:
-    """JSON fallback for types YAML frontmatter emits but stdlib json can't encode.
-
-    Obsidian and other markdown frontmatter commonly contain `YYYY-MM-DD` values
-    which PyYAML parses into `datetime.date`. Stored as ISO strings; round-tripped
-    values come back as strings (acceptable because metadata is informational,
-    not queried as dates).
-    """
-    if isinstance(value, date | datetime):
-        return value.isoformat()
-    return str(value)
-
-
-def get_effective_embedding_dimension() -> int:
-    """Get the embedding dimension based on configured provider."""
-    if EMBEDDING_PROVIDER == "openai":
-        return OPENAI_EMBEDDING_DIMENSION
-    return EMBEDDING_DIMENSION
 
 
 # Re-export types for backward compatibility
@@ -168,6 +148,13 @@ class Database:
             raise
         else:
             conn.commit()
+
+    def close(self) -> None:
+        """Close the current thread's SQLite connection, if one is open."""
+        conn: sqlite3.Connection | None = getattr(self._local, "connection", None)
+        if conn is not None:
+            conn.close()
+        self._local.connection = None
 
     def _get_vector_dimension(self, conn: sqlite3.Connection) -> int | None:
         """

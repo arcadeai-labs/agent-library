@@ -1,6 +1,6 @@
 [project]
 name = "agent-library"
-version = "0.13.1"
+version = "0.15.0"
 description = "Multi-modal knowledge library with vector and full-text search for text, code, images, and PDFs"
 readme = "README.md"
 license = "Apache-2.0"
@@ -60,6 +60,9 @@ code = [
 pdf = [
     "pypdf>=4.0.0",
 ]
+postgres = [
+    "psycopg[binary]>=3.1.0",
+]
 ocr = [
     "pytesseract>=0.3.10",
     "Pillow>=10.0.0",
@@ -71,7 +74,7 @@ vision = [
     "torchvision>=0.15.0",
 ]
 all = [
-    "agent-library[code,pdf,ocr,vision]",
+    "agent-library[code,pdf,ocr,vision,postgres]",
 ]
 evals = [
     "arcade-mcp[evals]>=1.14.0",
@@ -103,6 +106,7 @@ source_modules = ["librarian.connectors"]
 forbidden_modules = [
     "librarian.storage.database",
     "librarian.storage.sqlite_storage",
+    "librarian.storage.postgres",
     "librarian.storage.vector_store",
     "librarian.storage.fts_store",
     "librarian.indexing",
@@ -117,11 +121,38 @@ source_modules = ["librarian.storage.protocols"]
 forbidden_modules = [
     "librarian.storage.database",
     "librarian.storage.sqlite_storage",
+    "librarian.storage.postgres",
 ]
 # Only direct imports: protocols references the read-side result types
 # (fts_store / vector_store) under TYPE_CHECKING, which transitively reach the
 # concrete Database. We forbid protocols from *directly* depending on a concrete
 # write backend, not those typing-only edges.
+allow_indirect_imports = true
+
+[[tool.importlinter.contracts]]
+name = "App-facing storage consumers use the storage factory, not concrete backends"
+type = "forbidden"
+source_modules = [
+    "librarian.cli",
+    "librarian.server",
+    "librarian.retrieval",
+    "librarian.orchestrator",
+]
+forbidden_modules = [
+    "librarian.storage.database",
+    "librarian.storage.sqlite_storage",
+    "librarian.storage.postgres",
+    "librarian.storage.vector_store",
+    "librarian.storage.fts_store",
+]
+ignore_imports = [
+    # SQLite-only maintenance/backcompat paths. Normal app-facing read/write
+    # paths must go through librarian.storage.factory.
+    "librarian.cli -> librarian.storage.database",
+    "librarian.server -> librarian.storage.database",
+]
+# Direct imports only: these modules may depend on concrete backends through
+# librarian.storage.factory, which is the approved substrate-selection boundary.
 allow_indirect_imports = true
 
 [tool.hatch.build.targets.wheel]
@@ -139,6 +170,14 @@ warn_return_any = true
 warn_unused_ignores = false
 show_error_codes = true
 ignore_missing_imports = true
+
+# psycopg / pgvector are optional (the `postgres` extra) and may be absent in
+# the type-check environment; skip following them so the Postgres backend
+# type-checks with or without the driver installed.
+[[tool.mypy.overrides]]
+module = ["psycopg.*", "pgvector.*", "psycopg_pool.*"]
+ignore_missing_imports = true
+follow_imports = "skip"
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

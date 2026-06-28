@@ -151,9 +151,13 @@ All components use strongly-typed enums:
    - Future: CodeBERT for code, CLIP for images
 
 ### Storage Layer (`librarian/storage/`)
+- `protocols.py`: The substrate-agnostic `Storage` protocol bundle (`MetadataStore` / `VectorStore` / `FTSStore` / `StateStore` + `migrate`/`transaction`/write paths)
+- `factory.py`: Backend-neutral resolution — `get_storage()` (write paths, migrated), `get_read_storage()` (search), `get_metadata_store()`. Selects the backend from `STORAGE_BACKEND`; SQLite is the default.
 - `database.py`: Core SQLite operations with thread-safe connection management
 - `vector_store.py`: Vector similarity search using sqlite-vec (preserves asset_type)
 - `fts_store.py`: Full-text search using FTS5 with BM25 ranking (preserves asset_type)
+- `sqlite_storage.py`: `SQLiteStorage` — the default concrete `Storage` bundle
+- `postgres/`: `PostgresStorage` — pgvector-backed `Storage` bundle (DEV-472). Mirrors the SQLite v0.14 schema (pgvector `vector(dim)` columns + a `tsvector` generated column for FTS + `sync_state`). Selected via `STORAGE_BACKEND=postgres`; requires the `postgres` extra (`uv pip install -e ".[postgres]"`) and `POSTGRES_DSN`. Same observable `libr add`/`libr search` behavior as SQLite; atomic content+cursor writes stay single-substrate.
 
 Multi-Modal Schema (Complete):
 - `documents` table: Stores file metadata with `asset_type` and `modality_data` columns
@@ -186,6 +190,12 @@ All settings in `librarian/config.py` can be overridden via environment variable
 - `DATABASE_PATH`: SQLite database location (default: `~/.librarian/index.db`)
 - `SOURCES_CONFIG_PATH`: Sources configuration (default: `~/.librarian/sources.json`)
 - `DOCUMENTS_PATH`: Default document directory (default: `./documents`)
+
+### Storage Backend (DEV-472)
+- `STORAGE_BACKEND`: `sqlite` (default) or `postgres`
+- `POSTGRES_DSN`: Postgres connection string (libpq DSN or `postgres://` URL); `DATABASE_URL` is accepted as a fallback. Required when `STORAGE_BACKEND=postgres`.
+- `POSTGRES_SCHEMA`: schema for librarian-owned tables (default: `public`)
+- Tests: set `TEST_POSTGRES_DSN` to run the parameterized storage suite (`tests/test_storage_contract.py`) against Postgres; it's skipped when unset. The pgvector extension is pinned to `public`. Quick local DB: `docker run -d -e POSTGRES_PASSWORD=postgres -e POSTGRES_DB=librarian -p 5432:5432 pgvector/pgvector:pg16`.
 
 ### Text Embedding
 - `EMBEDDING_PROVIDER`: "local" or "openai"

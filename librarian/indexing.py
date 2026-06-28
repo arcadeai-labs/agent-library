@@ -15,7 +15,6 @@ from pathlib import Path
 from typing import Any
 
 from librarian.processing.parsers.base import FileReadError, FileReadTimeoutError
-from librarian.storage.database import get_database
 
 logger = logging.getLogger(__name__)
 
@@ -27,13 +26,11 @@ _DEPRECATION_MESSAGE = (
 
 
 def _build_orchestrator() -> Any:
-    """Construct an Orchestrator bound to the current database (v0.14 schema)."""
+    """Construct an Orchestrator bound to the active storage backend (v0.14 schema)."""
     from librarian.orchestrator import Orchestrator
-    from librarian.storage.sqlite_storage import SQLiteStorage
+    from librarian.storage.factory import get_storage
 
-    storage = SQLiteStorage(database=get_database())
-    storage.migrate()
-    return Orchestrator(storage=storage)
+    return Orchestrator(storage=get_storage())
 
 
 class IndexingService:
@@ -61,7 +58,11 @@ class IndexingService:
             FileReadTimeoutError: If stat() times out.
             FileReadError: For I/O errors.
         """
-        db = get_database()
+        # Route through the storage factory so this honors STORAGE_BACKEND (it's a
+        # normal ingest-path read, not SQLite-only maintenance).
+        from librarian.storage.factory import get_metadata_store
+
+        metadata = get_metadata_store()
         try:
             current_mtime = file_path.stat().st_mtime
         except TimeoutError as e:
@@ -71,7 +72,7 @@ class IndexingService:
         except OSError as e:
             raise FileReadError(f"Cannot access {file_path}: {e}") from e
 
-        existing = db.get_document_by_path(str(file_path))
+        existing = metadata.get_document_by_path(str(file_path))
         if not existing:
             return True
         if existing.file_mtime is None:

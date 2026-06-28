@@ -33,13 +33,15 @@ from librarian.processing.parsers.registry import get_parser_for_file
 from librarian.processing.transform.chunker import Chunker, ChunkingStrategy
 from librarian.processing.transform.code import CodeChunker, chunk_code_by_blocks
 from librarian.processing.transform.pdf import PDFChunker
-from librarian.storage.protocols import Storage, SyncState
-from librarian.storage.sqlite_storage import get_storage
+from librarian.storage.factory import get_storage
+from librarian.storage.protocols import SyncState
 from librarian.storage.write_models import PreparedChunk, PreparedDocument
 from librarian.types import AssetType, EmbeddingModality, ParsedDocument, TextChunk
 
 if TYPE_CHECKING:
     from PIL.Image import Image as PILImage
+
+    from librarian.storage.protocols import Storage
 
 logger = logging.getLogger(__name__)
 
@@ -62,7 +64,7 @@ class Orchestrator:
 
     def __init__(
         self,
-        storage: Storage | None = None,
+        storage: "Storage | None" = None,
         embedder: Any = None,
     ) -> None:
         self.storage: Storage = storage or get_storage()
@@ -422,7 +424,7 @@ class Orchestrator:
             all_fresh: list[list[float]] = embedder.embed_documents(contents)
             return all_fresh
 
-        from librarian.storage.database import get_effective_embedding_dimension
+        from librarian.config import get_effective_embedding_dimension
 
         expected_dim = get_effective_embedding_dimension()
         existing = self.storage.existing_text_chunks(document_id)

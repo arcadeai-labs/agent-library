@@ -1,4 +1,5 @@
 .DS_Store
+.vscode/
 
 # SQLite in-memory artifacts
 :memory:

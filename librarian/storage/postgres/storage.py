@@ -1,100 +1,108 @@
 """
-SQLiteStorage -- the default concrete implementation of the v0.14 Storage bundle.
+PostgresStorage -- the pgvector-backed implementation of the v0.14 Storage bundle.
 
-Wraps the existing :class:`~librarian.storage.database.Database`,
-:class:`~librarian.storage.vector_store.VectorStore` and
-:class:`~librarian.storage.fts_store.FTSStore` (which provide the read-side
-protocols) and adds:
+A drop-in peer of :class:`librarian.storage.sqlite_storage.SQLiteStorage`: it
+satisfies the same ``Storage`` protocol (``metadata`` / ``vectors`` / ``fts`` /
+``state`` capability stores plus ``migrate`` / ``transaction`` / write paths) so
+the orchestrator and retrieval layer run against it unchanged.
 
-* :meth:`migrate` -- run the v0.14 schema migration.
-* :meth:`transaction` -- atomic content + cursor writes on one connection.
-* sync-state persistence (the ``StateStore`` protocol).
-* :meth:`write_upsert` / :meth:`soft_delete_document` -- the write paths the
-  orchestrator drives.
-
-All writes go through raw SQL on the transaction connection rather than through
-``Database``'s per-call mutators, because those commit eagerly and would break
-the "content + cursor advance in one transaction" guarantee.
+The crucial guarantee carries over verbatim: :meth:`write_upsert` and
+:meth:`put_sync_state` issued inside one :meth:`transaction` block commit or
+roll back together, so a mid-stream crash never leaves orphan ``chunks`` rows
+or a cursor pointing past uncommitted content.
 """
 
 import json
 import logging
-import sqlite3
-from collections.abc import Iterator
+from collections.abc import Generator
 from contextlib import contextmanager
 from datetime import datetime, timezone
+from typing import Any
 
+import librarian.config as config
+from librarian.config import POSTGRES_DSN, POSTGRES_SCHEMA
 from librarian.storage._common import iso as _iso
 from librarian.storage._common import json_default as _json_default
 from librarian.storage._common import modality_table as _modality_table
-from librarian.storage.database import (
-    Database,
-    deserialize_embedding,
-    get_database,
-    serialize_embedding,
+from librarian.storage.postgres.database import (
+    PostgresDatabase,
+    parse_vector,
+    vector_literal,
 )
-from librarian.storage.fts_store import FTSStore
-from librarian.storage.migrate import migrate as migrate_schema
+from librarian.storage.postgres.fts_store import PgFTSStore
+from librarian.storage.postgres.migrate import migrate as migrate_schema
+from librarian.storage.postgres.vector_store import PgVectorStore
 from librarian.storage.protocols import SyncState
-from librarian.storage.vector_store import VectorStore
 from librarian.storage.write_models import PreparedDocument
 
 logger = logging.getLogger(__name__)
 
-__all__ = ["SQLiteStorage", "get_storage"]
+__all__ = ["PostgresStorage", "get_postgres_storage"]
 
 
-class SQLiteStorage:
-    """SQLite-backed implementation of the v0.14 ``Storage`` bundle."""
+class PostgresStorage:
+    """Postgres-backed implementation of the v0.14 ``Storage`` bundle."""
 
-    def __init__(self, database: Database | None = None) -> None:
-        self._db = database or get_database()
+    def __init__(
+        self,
+        database: PostgresDatabase | None = None,
+        dsn: str | None = None,
+        schema: str | None = None,
+    ) -> None:
+        self._db = database or PostgresDatabase(
+            dsn=dsn or POSTGRES_DSN, schema=schema or POSTGRES_SCHEMA
+        )
         self.metadata = self._db
-        self.vectors = VectorStore(self._db)
-        self.fts = FTSStore(self._db)
+        self.vectors = PgVectorStore(self._db)
+        self.fts = PgFTSStore(self._db)
         # The StateStore protocol is satisfied by this object itself.
         self.state = self
 
     @property
-    def database(self) -> Database:
+    def database(self) -> PostgresDatabase:
         return self._db
 
     def migrate(self) -> None:
-        """Run the v0.14 schema migration against the underlying database."""
+        """Create/upgrade the v0.14 Postgres schema (idempotent)."""
         conn = self._db._get_connection()
-        migrate_schema(conn)
+        migrate_schema(conn, schema=self._db.schema)
 
     @contextmanager
-    def transaction(self) -> Iterator[sqlite3.Connection]:
-        """Yield the thread-local connection as a single atomic transaction.
+    def transaction(self) -> Generator[Any, None, None]:
+        """Yield the thread-local connection as one atomic transaction.
 
-        Commits on clean exit, rolls back on exception. Content writes and
-        cursor advances issued within the same ``with`` block commit or roll
-        back together.
+        Opens a real ``conn.transaction()`` block on the autocommit connection:
+        commits on clean exit, rolls back on exception. Reads issued inside this
+        block (e.g. ``get_sync_state``) run in the same transaction without
+        committing it, so content writes and cursor advances commit or roll back
+        together.
         """
         conn = self._db._get_connection()
-        try:
+        with conn.transaction():
             yield conn
-        except Exception:
-            conn.rollback()
-            raise
-        else:
-            conn.commit()
 
     # =========================================================================
     # StateStore
     # =========================================================================
 
     def get_sync_state(self, source_key: str) -> SyncState | None:
+        # Bare read on the (autocommit) thread-local connection: standalone it
+        # commits nothing; nested inside a ``transaction()`` block it joins that
+        # transaction without committing it (the atomicity guarantee).
         conn = self._db._get_connection()
         row = conn.execute(
-            "SELECT * FROM sync_state WHERE source_key = ?", (source_key,)
+            "SELECT * FROM sync_state WHERE source_key = %s", (source_key,)
         ).fetchone()
         if row is None:
             return None
+        cursor = row["cursor"]
+        if isinstance(cursor, str):
+            cursor = json.loads(cursor) if cursor else {}
+        elif cursor is None:
+            cursor = {}
         return SyncState(
             source_key=row["source_key"],
-            cursor=json.loads(row["cursor"]) if row["cursor"] else {},
+            cursor=cursor,
             status=row["status"],
             last_success_at=row["last_success_at"],
             last_attempt_at=row["last_attempt_at"],
@@ -104,12 +112,8 @@ class SQLiteStorage:
             config_version=row["config_version"] or 0,
         )
 
-    def put_sync_state(self, state: SyncState, conn: sqlite3.Connection | None = None) -> None:
-        """Upsert a sync-state row.
-
-        When ``conn`` is provided the write joins the caller's transaction (so a
-        cursor advance commits atomically with the content it describes).
-        """
+    def put_sync_state(self, state: SyncState, conn: Any = None) -> None:
+        """Upsert a sync-state row, joining ``conn``'s transaction when given."""
         own = conn is None
         conn = conn or self._db._get_connection()
         conn.execute(
@@ -117,7 +121,7 @@ class SQLiteStorage:
             INSERT INTO sync_state (
                 source_key, cursor, status, last_success_at, last_attempt_at,
                 last_error, documents_seen, chunks_written, config_version
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ) VALUES (%s, %s::jsonb, %s, %s, %s, %s, %s, %s, %s)
             ON CONFLICT(source_key) DO UPDATE SET
                 cursor = excluded.cursor,
                 status = excluded.status,
@@ -148,33 +152,35 @@ class SQLiteStorage:
             conn.commit()
 
     def get_file_mtime(self, source_key: str, path: str) -> float | None:
-        """Return the last-recorded mtime for a single file, or ``None``."""
+        """Return the last-recorded mtime for a single file, or ``None``.
+
+        Bare read (see :meth:`get_sync_state`): safe to call inside a write
+        ``transaction()`` without committing it.
+        """
         conn = self._db._get_connection()
         row = conn.execute(
-            "SELECT mtime FROM source_file_state WHERE source_key = ? AND path = ?",
+            "SELECT mtime FROM source_file_state WHERE source_key = %s AND path = %s",
             (source_key, path),
         ).fetchone()
-        return row["mtime"] if row is not None else None
+        return float(row["mtime"]) if row is not None else None
 
     def set_file_mtime(
         self,
         source_key: str,
         path: str,
         mtime: float,
-        conn: sqlite3.Connection | None = None,
+        conn: Any = None,
     ) -> None:
-        """Upsert one file's mtime as a single indexed row (O(1), no full rewrite).
-
-        When ``conn`` is provided the write joins the caller's transaction so the
-        per-file cursor advances atomically with the content it describes.
-        """
+        """Upsert one file's mtime, joining ``conn``'s transaction when given."""
         own = conn is None
         conn = conn or self._db._get_connection()
         conn.execute(
             """
             INSERT INTO source_file_state (source_key, path, mtime)
-            VALUES (?, ?, ?)
-            ON CONFLICT(source_key, path) DO UPDATE SET mtime = excluded.mtime
+            VALUES (%s, %s, %s)
+            ON CONFLICT(source_key, path) DO UPDATE SET
+                mtime = excluded.mtime,
+                updated_at = now()
             """,
             (source_key, path, mtime),
         )
@@ -188,9 +194,13 @@ class SQLiteStorage:
     def existing_text_chunks(self, document_id: str) -> dict[str, tuple[str, list[float] | None]]:
         """Return the document's live chunks as ``chunk_id -> (content, text_embedding)``.
 
-        Only non-deleted chunks are included; the embedding is the stored
-        TEXT-modality vector, or ``None`` when the chunk has no text embedding.
-        CODE/VISION embeddings are not returned.
+        Mirrors SQLiteStorage so the orchestrator can reuse unchanged text
+        embeddings before replacing a document's chunks.
+
+        This is a bare read on the autocommit connection, so it does not hold a
+        snapshot open across the (potentially slow/network) embed call that
+        follows in the orchestrator -- no idle-in-transaction, nothing to block
+        VACUUM.
         """
         conn = self._db._get_connection()
         rows = conn.execute(
@@ -198,29 +208,25 @@ class SQLiteStorage:
             SELECT c.chunk_id, c.content, ce.embedding AS embedding
             FROM chunks c
             LEFT JOIN chunk_embeddings ce ON ce.chunk_id = c.id
-            WHERE c.document_id = (SELECT id FROM documents WHERE document_id = ?)
+            WHERE c.document_id = (SELECT id FROM documents WHERE document_id = %s)
               AND c.deleted_at IS NULL
               AND c.chunk_id IS NOT NULL
             """,
             (document_id,),
         ).fetchall()
-        result: dict[str, tuple[str, list[float] | None]] = {}
-        for row in rows:
-            embedding = deserialize_embedding(row["embedding"]) if row["embedding"] else None
-            result[row["chunk_id"]] = (row["content"], embedding)
-        return result
+        return {row["chunk_id"]: (row["content"], parse_vector(row["embedding"])) for row in rows}
 
-    def write_upsert(self, conn: sqlite3.Connection, prepared: PreparedDocument) -> None:
+    def write_upsert(self, conn: Any, prepared: PreparedDocument) -> None:
         """Create-or-replace a document and all its chunks within ``conn``'s txn."""
         doc_pk = self._upsert_document_row(conn, prepared)
         self._replace_chunks(conn, doc_pk, prepared)
 
-    def _upsert_document_row(self, conn: sqlite3.Connection, prepared: PreparedDocument) -> int:
+    def _upsert_document_row(self, conn: Any, prepared: PreparedDocument) -> int:
         metadata_json = (
             json.dumps(prepared.metadata, default=_json_default) if prepared.metadata else None
         )
         row = conn.execute(
-            "SELECT id FROM documents WHERE document_id = ? OR path = ?",
+            "SELECT id FROM documents WHERE document_id = %s OR path = %s",
             (prepared.document_id, prepared.path),
         ).fetchone()
         if row is not None:
@@ -228,10 +234,11 @@ class SQLiteStorage:
             conn.execute(
                 """
                 UPDATE documents
-                SET document_id = ?, path = ?, title = ?, content = ?, metadata = ?,
-                    file_mtime = ?, asset_type = ?, document_source_uri = ?,
-                    source_created_at = ?, updated_at = CURRENT_TIMESTAMP
-                WHERE id = ?
+                SET document_id = %s, path = %s, title = %s, content = %s,
+                    metadata = %s::jsonb, file_mtime = %s, asset_type = %s,
+                    document_source_uri = %s, source_created_at = %s,
+                    updated_at = now()
+                WHERE id = %s
                 """,
                 (
                     prepared.document_id,
@@ -246,15 +253,17 @@ class SQLiteStorage:
                     doc_pk,
                 ),
             )
-            self._delete_chunks_for_document(conn, doc_pk)
+            # Chunk embeddings cascade from the chunks FK.
+            conn.execute("DELETE FROM chunks WHERE document_id = %s", (doc_pk,))
             return int(doc_pk)
 
-        cursor = conn.execute(
+        row = conn.execute(
             """
             INSERT INTO documents (
                 document_id, path, title, content, metadata, file_mtime,
                 asset_type, document_source_uri, source_created_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ) VALUES (%s, %s, %s, %s, %s::jsonb, %s, %s, %s, %s)
+            RETURNING id
             """,
             (
                 prepared.document_id,
@@ -267,29 +276,24 @@ class SQLiteStorage:
                 prepared.document_source_uri,
                 _iso(prepared.source_created_at),
             ),
-        )
-        return int(cursor.lastrowid)  # type: ignore[arg-type]
+        ).fetchone()
+        return int(row["id"])
 
-    def _delete_chunks_for_document(self, conn: sqlite3.Connection, doc_pk: int) -> None:
-        for table in ("chunk_embeddings", "vec_chunks_code", "vec_chunks_vision"):
-            conn.execute(
-                f"DELETE FROM {table} WHERE chunk_id IN "  # noqa: S608 - table literal
-                "(SELECT id FROM chunks WHERE document_id = ?)",
-                (doc_pk,),
-            )
-        conn.execute("DELETE FROM chunks WHERE document_id = ?", (doc_pk,))
-
-    def _replace_chunks(
-        self, conn: sqlite3.Connection, doc_pk: int, prepared: PreparedDocument
-    ) -> None:
+    def _replace_chunks(self, conn: Any, doc_pk: int, prepared: PreparedDocument) -> None:
+        # TODO(DEV-472): batch these writes. This issues 2N round-trips per
+        # document (one chunk INSERT...RETURNING + one embedding INSERT per
+        # chunk). In-process SQLite hides the cost, but on Postgres it dominates
+        # ingest latency for large documents -- switch to a multi-row
+        # INSERT...RETURNING (psycopg execute_values) + bulk embedding insert.
         for chunk in prepared.chunks:
-            cursor = conn.execute(
+            row = conn.execute(
                 """
                 INSERT INTO chunks (
                     document_id, chunk_id, content, heading_path, chunk_index,
                     start_char, end_char, asset_type, modality, document_size,
                     source_created_at, document_source_uri, chunk_source_uri
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                RETURNING id
                 """,
                 (
                     doc_pk,
@@ -306,46 +310,57 @@ class SQLiteStorage:
                     prepared.document_source_uri,
                     chunk.chunk_source_uri,
                 ),
-            )
-            chunk_pk = cursor.lastrowid
+            ).fetchone()
+            chunk_pk = row["id"]
             if chunk.embedding:
                 table = _modality_table(chunk.modality)
+                literal = vector_literal(chunk.embedding)
                 if table == "chunk_embeddings":
                     conn.execute(
                         "INSERT INTO chunk_embeddings (chunk_id, embedding, model_version) "
-                        "VALUES (?, ?, ?)",
-                        (chunk_pk, serialize_embedding(chunk.embedding), chunk.model_version),
+                        "VALUES (%s, %s::vector, %s)",
+                        (chunk_pk, literal, chunk.model_version),
                     )
                 else:
                     conn.execute(
-                        f"INSERT INTO {table} (chunk_id, embedding) VALUES (?, ?)",  # noqa: S608
-                        (chunk_pk, serialize_embedding(chunk.embedding)),
+                        f"INSERT INTO {table} (chunk_id, embedding) "  # noqa: S608
+                        "VALUES (%s, %s::vector)",
+                        (chunk_pk, literal),
                     )
 
-    def soft_delete_document(
-        self, conn: sqlite3.Connection, document_id: str, reason: str | None
-    ) -> int:
+    def soft_delete_document(self, conn: Any, document_id: str, reason: str | None) -> int:
         """Tombstone all chunks of a document. Returns the number tombstoned."""
         now = datetime.now(timezone.utc).isoformat()
         cursor = conn.execute(
             """
             UPDATE chunks
-            SET deleted_at = ?, deletion_reason = ?
-            WHERE document_id = (SELECT id FROM documents WHERE document_id = ?)
+            SET deleted_at = %s, deletion_reason = %s
+            WHERE document_id = (SELECT id FROM documents WHERE document_id = %s)
               AND deleted_at IS NULL
             """,
             (now, reason, document_id),
         )
-        return cursor.rowcount
+        return int(cursor.rowcount)
 
 
-_storage_instance: SQLiteStorage | None = None
+_storage_instances: dict[tuple[str, str], PostgresStorage] = {}
 
 
-def get_storage() -> SQLiteStorage:
-    """Get a process-wide :class:`SQLiteStorage` (migrated to v0.14)."""
-    global _storage_instance
-    if _storage_instance is None:
-        _storage_instance = SQLiteStorage()
-        _storage_instance.migrate()
-    return _storage_instance
+def get_postgres_storage() -> PostgresStorage:
+    """Get a process-wide :class:`PostgresStorage` (migrated to v0.14).
+
+    The instance is cached on the active ``(POSTGRES_DSN, POSTGRES_SCHEMA)`` pair
+    rather than as a single global. Reading config dynamically means a test that
+    isolates substrates per-schema -- or a deployment that rotates its DSN -- gets
+    a fresh, correctly-targeted instance instead of silently reusing the first
+    schema/DSN bound at startup.
+    """
+    dsn = config.POSTGRES_DSN
+    schema = config.POSTGRES_SCHEMA
+    key = (dsn or "", schema)
+    instance = _storage_instances.get(key)
+    if instance is None:
+        instance = PostgresStorage(dsn=dsn, schema=schema)
+        instance.migrate()
+        _storage_instances[key] = instance
+    return instance

@@ -28,9 +28,7 @@ from librarian.config import (
     SEARCH_LIMIT,
 )
 from librarian.processing.embed import get_embedder_for_modality
-from librarian.storage.database import get_database
-from librarian.storage.fts_store import FTSStore
-from librarian.storage.vector_store import VectorStore
+from librarian.storage.factory import get_read_storage
 from librarian.types import AssetType, EmbeddingModality, SearchResult
 
 if TYPE_CHECKING:
@@ -68,9 +66,12 @@ class HybridSearcher:
         self.hybrid_alpha = hybrid_alpha if hybrid_alpha is not None else HYBRID_ALPHA
         self.mmr_lambda = mmr_lambda if mmr_lambda is not None else MMR_LAMBDA
 
-        self.db = get_database()
-        self.vector_store = VectorStore(self.db)
-        self.fts_store = FTSStore(self.db)
+        # Resolve the read stores from the active storage backend (sqlite or
+        # postgres) so search runs against whichever substrate ingest wrote to.
+        storage = get_read_storage()
+        self.db = storage.metadata
+        self.vector_store = storage.vectors
+        self.fts_store = storage.fts
 
     def search(
         self,

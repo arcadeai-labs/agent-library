@@ -87,6 +87,39 @@ SOURCES_CONFIG_PATH = os.path.abspath(
 )
 
 # =============================================================================
+# Storage Backend Configuration
+# =============================================================================
+
+# Which storage substrate the Storage bundle resolves to. "sqlite" is the
+# default for OSS / local use (zero external dependencies); "postgres" selects
+# the pgvector-backed PostgresStorage (requires the `postgres` extra).
+STORAGE_BACKEND = os.getenv("STORAGE_BACKEND", "sqlite").strip().lower()
+if STORAGE_BACKEND not in {"sqlite", "postgres"}:
+    raise ValueError(
+        f"Invalid STORAGE_BACKEND {STORAGE_BACKEND!r}; expected one of: postgres, sqlite."
+    )
+
+# Postgres connection string (libpq DSN or postgres:// URL). DATABASE_URL is
+# accepted as a fallback so the backend works out of the box on common PaaS.
+POSTGRES_DSN = os.getenv("POSTGRES_DSN") or os.getenv("DATABASE_URL")
+
+# Schema the librarian-owned tables live in. Overridable so test runs (and
+# multi-tenant deployments) can isolate their tables on a shared database.
+POSTGRES_SCHEMA = os.getenv("POSTGRES_SCHEMA", "public").strip()
+
+# Connection / query timeouts (Postgres only). These keep an unreachable host or
+# a pathological query from hanging a worker thread or pinning a server
+# connection indefinitely. ``0`` disables the corresponding server-side timeout.
+POSTGRES_CONNECT_TIMEOUT = safe_int(os.getenv("POSTGRES_CONNECT_TIMEOUT"), 10)
+POSTGRES_STATEMENT_TIMEOUT_MS = safe_int(os.getenv("POSTGRES_STATEMENT_TIMEOUT_MS"), 30_000)
+POSTGRES_IDLE_TX_TIMEOUT_MS = safe_int(os.getenv("POSTGRES_IDLE_TX_TIMEOUT_MS"), 60_000)
+
+# Text-search configuration (regconfig) used for the generated ``content_tsv``
+# column and the FTS query/headline functions. Pinned at table-creation time;
+# changing it on a populated database requires a schema rebuild.
+POSTGRES_FTS_LANGUAGE = os.getenv("POSTGRES_FTS_LANGUAGE", "english").strip()
+
+# =============================================================================
 # Text Embedding Configuration
 # =============================================================================
 
@@ -104,6 +137,14 @@ EMBEDDING_QUERY_INSTRUCTION = os.getenv(
     "EMBEDDING_QUERY_INSTRUCTION",
     "Given a query, return relevant information from documents.",
 )
+
+
+def get_effective_embedding_dimension() -> int:
+    """Get the text embedding dimension based on the configured provider."""
+    if EMBEDDING_PROVIDER == "openai":
+        return OPENAI_EMBEDDING_DIMENSION
+    return EMBEDDING_DIMENSION
+
 
 # =============================================================================
 # Code Embedding Configuration

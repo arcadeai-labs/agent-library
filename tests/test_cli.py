@@ -1,5 +1,6 @@
 """Tests for CLI behavior."""
 
+from datetime import datetime, timezone
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -80,6 +81,47 @@ def test_add_directory_exits_nonzero_when_indexing_errors(
     assert "parser exploded" in result.output
 
 
+def test_add_existing_source_reindexes_without_duplicate(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A registered source may still need indexing in the active backend."""
+    source = tmp_path / "README.md"
+    source.write_text("# README\n\nstorage", encoding="utf-8")
+
+    config_dir = tmp_path / "config"
+    sources_file = config_dir / "sources.json"
+    monkeypatch.setattr(cli, "CONFIG_DIR", config_dir)
+    monkeypatch.setattr(cli, "SOURCES_FILE", sources_file)
+    monkeypatch.setattr(cli, "SETTINGS_FILE", config_dir / "settings.json")
+    monkeypatch.setattr(cli, "_get_config", lambda: {"ensure_directories": lambda: None})
+    monkeypatch.setattr(cli, "console", Console(width=500, color_system=None))
+
+    cli._save_sources([
+        {
+            "name": "README.md",
+            "path": str(source),
+            "type": "local",
+            "is_file": True,
+        }
+    ])
+
+    indexed: list[Path] = []
+
+    def fake_index_path(file_path: Path, verbose: bool = False) -> dict[str, Any]:
+        indexed.append(file_path)
+        return {"status": "created", "chunks": 1}
+
+    monkeypatch.setattr(cli, "_index_path", fake_index_path)
+
+    result = CliRunner().invoke(cli.app, ["add", str(source)])
+
+    assert result.exit_code == 0
+    assert indexed == [source.resolve()]
+    assert "Source already registered" in result.output
+    assert "Source indexed" in result.output
+    assert len(cli._load_sources()) == 1
+
+
 def test_search_table_wraps_long_windows_paths(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -136,7 +178,7 @@ def test_docs_overview_wraps_long_windows_paths(monkeypatch: pytest.MonkeyPatch)
         lambda: [{"name": "docs", "path": LONG_WINDOWS_PATH, "is_file": False}],
     )
     monkeypatch.setattr(
-        "librarian.storage.database.get_database",
+        "librarian.storage.factory.get_metadata_store",
         lambda: SimpleNamespace(list_documents=lambda: [fake_document()]),
     )
 
@@ -150,7 +192,7 @@ def test_docs_list_table_wraps_long_windows_paths(monkeypatch: pytest.MonkeyPatc
     monkeypatch.setattr(cli, "_get_config", lambda: {"ensure_directories": lambda: None})
     monkeypatch.setattr(cli, "console", Console(width=80, color_system=None))
     monkeypatch.setattr(
-        "librarian.storage.database.get_database",
+        "librarian.storage.factory.get_metadata_store",
         lambda: SimpleNamespace(list_documents=lambda: [fake_document()]),
     )
 
@@ -164,7 +206,7 @@ def test_docs_search_table_wraps_long_windows_paths(monkeypatch: pytest.MonkeyPa
     monkeypatch.setattr(cli, "_get_config", lambda: {"ensure_directories": lambda: None})
     monkeypatch.setattr(cli, "console", Console(width=80, color_system=None))
     monkeypatch.setattr(
-        "librarian.storage.database.get_database",
+        "librarian.storage.factory.get_metadata_store",
         lambda: SimpleNamespace(list_documents=lambda: [fake_document()]),
     )
 
@@ -203,6 +245,40 @@ def test_search_paths_outputs_complete_long_windows_paths(
 
     assert result.exit_code == 0
     assert result.output == f"{LONG_WINDOWS_PATH}\n"
+
+
+def test_search_timeframe_uses_configured_metadata_store(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Timeframe filtering must read the active storage backend, not SQLite directly."""
+    monkeypatch.setattr(cli, "_get_config", lambda: {"ensure_directories": lambda: None})
+    monkeypatch.setattr(cli, "console", Console(width=500, color_system=None))
+
+    async def fake_search_library(**kwargs: Any) -> list[dict[str, Any]]:
+        return [
+            {
+                "score": 1.0,
+                "document_path": "/postgres/doc.md",
+                "content": "matched content",
+                "heading_path": None,
+            }
+        ]
+
+    class FakeMetadata:
+        def get_document_by_path(self, path: str) -> Any:
+            assert path == "/postgres/doc.md"
+            return SimpleNamespace(updated_at=datetime.now(timezone.utc))
+
+    monkeypatch.setattr("librarian.server.search_library", fake_search_library)
+    monkeypatch.setattr("librarian.storage.factory.get_metadata_store", lambda: FakeMetadata())
+
+    result = CliRunner().invoke(
+        cli.app,
+        ["search", "postgres", "--timeframe", "today", "--format", "paths"],
+    )
+
+    assert result.exit_code == 0, result.output
+    assert result.output == "/postgres/doc.md\n"
 
 
 class TestIndexRebuild:
