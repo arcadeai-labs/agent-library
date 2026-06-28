@@ -478,6 +478,8 @@ class Database:
         self,
         start_date: datetime | None = None,
         end_date: datetime | None = None,
+        limit: int | None = None,
+        offset: int = 0,
     ) -> list[Document]:
         """
         List documents in the database, optionally filtered by date range.
@@ -485,41 +487,38 @@ class Database:
         Args:
             start_date: Optional start date for filtering (inclusive).
             end_date: Optional end date for filtering (exclusive).
+            limit: Optional cap on the number of rows returned. ``None`` (the
+                default) returns every match -- callers that only render a page
+                should pass a limit so the full ``content`` column isn't loaded
+                for the whole corpus.
+            offset: Number of leading rows to skip (for pagination). Ignored
+                unless ``limit`` is set.
 
         Returns:
-            List of documents matching the criteria.
+            List of documents matching the criteria, newest first. The
+            ``id`` tiebreak keeps the order (and therefore pagination) stable
+            when ``updated_at`` ties at the column's coarse resolution.
         """
-        with self._connection() as conn:
-            if start_date and end_date:
-                rows = conn.execute(
-                    """
-                    SELECT * FROM documents
-                    WHERE updated_at >= ? AND updated_at < ?
-                    ORDER BY updated_at DESC
-                    """,
-                    (start_date.isoformat(), end_date.isoformat()),
-                ).fetchall()
-            elif start_date:
-                rows = conn.execute(
-                    """
-                    SELECT * FROM documents
-                    WHERE updated_at >= ?
-                    ORDER BY updated_at DESC
-                    """,
-                    (start_date.isoformat(),),
-                ).fetchall()
-            elif end_date:
-                rows = conn.execute(
-                    """
-                    SELECT * FROM documents
-                    WHERE updated_at < ?
-                    ORDER BY updated_at DESC
-                    """,
-                    (end_date.isoformat(),),
-                ).fetchall()
-            else:
-                rows = conn.execute("SELECT * FROM documents ORDER BY updated_at DESC").fetchall()
+        # ``updated_at DESC, id DESC`` is the shared order both backends sort by,
+        # so a paginated read returns the same window regardless of substrate.
+        clauses: list[str] = []
+        params: list[Any] = []
+        if start_date:
+            clauses.append("updated_at >= ?")
+            params.append(start_date.isoformat())
+        if end_date:
+            clauses.append("updated_at < ?")
+            params.append(end_date.isoformat())
+        sql = "SELECT * FROM documents"
+        if clauses:
+            sql += " WHERE " + " AND ".join(clauses)
+        sql += " ORDER BY updated_at DESC, id DESC"
+        if limit is not None:
+            sql += " LIMIT ? OFFSET ?"
+            params.extend((limit, offset))
 
+        with self._connection() as conn:
+            rows = conn.execute(sql, params).fetchall()
             return [
                 Document(
                     id=row["id"],

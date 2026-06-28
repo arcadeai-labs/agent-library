@@ -1019,10 +1019,11 @@ def index_stats(
     # exempt from the top-level guard so the rebuild path stays runnable).
     _guard_schema_or_exit()
 
-    from librarian.storage.database import get_database
+    # Stats is backend-agnostic (get_stats is on the metadata protocol), so it
+    # goes through the storage factory and honors STORAGE_BACKEND.
+    from librarian.storage.factory import get_metadata_store
 
-    db = get_database()
-    stats_data = db.get_stats()
+    stats_data = get_metadata_store().get_stats()
 
     if output_json:
         print(json.dumps(stats_data, indent=2, default=str))

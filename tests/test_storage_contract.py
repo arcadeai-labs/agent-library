@@ -85,10 +85,11 @@ def _make_postgres(dsn: str) -> Iterator[StorageHarness]:
     finally:
         from psycopg import sql
 
-        conn = storage.database._get_connection()
         try:
-            conn.execute(sql.SQL("DROP SCHEMA IF EXISTS {} CASCADE").format(sql.Identifier(schema)))
-            conn.commit()
+            with storage.database._connection() as conn:
+                conn.execute(
+                    sql.SQL("DROP SCHEMA IF EXISTS {} CASCADE").format(sql.Identifier(schema))
+                )
         finally:
             storage.database.close()
 
@@ -141,6 +142,38 @@ def _prepare(native_id: str, text: str, embedder: FakeEmbedder) -> PreparedDocum
     )
 
 
+def _prepare_multi(native_id: str, texts: list[str], embedder: FakeEmbedder) -> PreparedDocument:
+    """Build a multi-chunk PreparedDocument with deterministic ids per chunk."""
+    chunks: list[PreparedChunk] = []
+    offset = 0
+    for i, text in enumerate(texts):
+        chunk_native = f"{native_id}#{i}"
+        chunks.append(
+            PreparedChunk(
+                chunk_id=ids.chunk_id(CONNECTOR, SOURCE_TYPE, chunk_native),
+                content=text,
+                chunk_index=i,
+                start_char=offset,
+                end_char=offset + len(text),
+                asset_type=AssetType.TEXT,
+                modality=EmbeddingModality.TEXT,
+                embedding=embedder.embed_documents([text])[0],
+                model_version=embedder.model_name,
+            )
+        )
+        offset += len(text)
+    return PreparedDocument(
+        document_id=ids.document_id(CONNECTOR, SOURCE_TYPE, native_id),
+        path=native_id,
+        title=native_id,
+        content=" ".join(texts),
+        metadata={"source": "contract"},
+        asset_type=AssetType.TEXT,
+        document_size=offset,
+        chunks=chunks,
+    )
+
+
 def _write(harness: StorageHarness, prepared: PreparedDocument) -> None:
     with harness.storage.transaction() as conn:
         harness.storage.write_upsert(conn, prepared)
@@ -163,6 +196,37 @@ def test_write_upsert_persists_document_and_chunks(backend: StorageHarness) -> N
     assert doc is not None
     assert doc.content == "hello world"
     assert doc.metadata.get("source") == "contract"
+
+
+def test_write_upsert_persists_all_chunks_of_multi_chunk_document(
+    backend: StorageHarness,
+) -> None:
+    """A multi-chunk document writes every chunk + embedding (batched on Postgres).
+
+    Locks in the batched-insert path: all N chunks land with their embeddings,
+    each searchable, with the deterministic ids preserved -- the same invariants
+    a per-chunk loop guaranteed, now under a single multi-row INSERT.
+    """
+    embedder = FakeEmbedder()
+    texts = ["alpha one", "beta two", "gamma three", "delta four", "epsilon five"]
+    prepared = _prepare_multi("multi", texts, embedder)
+
+    _write(backend, prepared)
+
+    assert backend.count("documents") == 1
+    assert backend.count("chunks") == len(texts)
+    assert backend.count("chunk_embeddings") == len(texts)
+    # Every chunk's deterministic id round-trips.
+    assert set(backend.chunk_ids()) == {c.chunk_id for c in prepared.chunks}
+
+    # Each chunk's own embedding is its own nearest neighbor (embeddings paired
+    # to the right chunk, not shuffled by the batch insert).
+    for chunk, text in zip(prepared.chunks, texts, strict=True):
+        results = backend.storage.vectors.search(
+            embedder.embed_documents([text])[0], limit=1, min_similarity=-1.0
+        )
+        assert results
+        assert results[0].content == chunk.content
 
 
 def test_reingest_is_idempotent(backend: StorageHarness) -> None:
@@ -229,6 +293,55 @@ def test_crash_rolls_back_content_and_cursor(backend: StorageHarness) -> None:
     assert backend.count("chunks") == 0
     assert backend.count("chunk_embeddings") == 0
     assert backend.storage.get_sync_state("contract") is None
+
+
+def test_list_documents_pagination(backend: StorageHarness) -> None:
+    """list_documents bounds the result set with limit/offset and a stable order.
+
+    The deliberate ``MetadataStore`` protocol change: both backends order
+    newest-first with an ``id`` tiebreak, so paging is deterministic across the
+    substrate even when ``updated_at`` ties at coarse resolution.
+    """
+    embedder = FakeEmbedder()
+    for i in range(5):
+        _write(backend, _prepare(f"p{i}", f"document number {i}", embedder))
+
+    meta = backend.storage.metadata
+
+    # Full list (no bound) returns all five.
+    everything = meta.list_documents()
+    assert len(everything) == 5
+    full_order = [d.path for d in everything]
+
+    # limit caps the count; the prefix matches the unbounded order.
+    first_two = meta.list_documents(limit=2)
+    assert [d.path for d in first_two] == full_order[:2]
+
+    # offset skips from the same stable order; limit+offset partition the list.
+    next_two = meta.list_documents(limit=2, offset=2)
+    assert [d.path for d in next_two] == full_order[2:4]
+
+    # offset past the end yields nothing.
+    assert meta.list_documents(limit=2, offset=10) == []
+
+
+def test_delete_document_by_path_removes_document_and_chunks(backend: StorageHarness) -> None:
+    """The admin hard-delete is backend-agnostic: it drops the document, its
+    chunks and embeddings, and reports whether anything was removed."""
+    embedder = FakeEmbedder()
+    _write(backend, _prepare("keep", "kept document", embedder))
+    _write(backend, _prepare("drop", "doomed document", embedder))
+
+    assert backend.storage.delete_document_by_path("drop") is True
+
+    assert backend.count("documents") == 1
+    assert backend.count("chunks") == 1
+    assert backend.count("chunk_embeddings") == 1
+    assert backend.storage.metadata.get_document_by_path("drop") is None
+    assert backend.storage.metadata.get_document_by_path("keep") is not None
+
+    # Deleting a path that isn't present is a no-op that reports False.
+    assert backend.storage.delete_document_by_path("drop") is False
 
 
 def test_soft_delete_tombstones_without_removing_rows(backend: StorageHarness) -> None:
@@ -422,6 +535,106 @@ def test_read_protocol_parity(backend: StorageHarness) -> None:
     assert meta.get_chunk_public_fields([m1_chunk_internal_id])  # sanity: id exists
 
 
+def test_postgres_chunks_live_view_centralizes_soft_delete_filter() -> None:
+    """On Postgres the soft-delete predicate lives in a ``chunks_live`` view.
+
+    Rather than repeating ``WHERE deleted_at IS NULL`` at every read site, the
+    Postgres reads select from ``chunks_live``; this asserts the view exists and
+    that it excludes tombstoned rows while the base ``chunks`` table keeps them.
+    """
+    dsn = os.getenv("TEST_POSTGRES_DSN")
+    if not dsn:
+        pytest.skip("TEST_POSTGRES_DSN not set")
+
+    import psycopg  # noqa: F401
+    from psycopg import sql
+
+    from librarian.storage.postgres import PostgresStorage
+
+    schema = f"librarian_test_{uuid.uuid4().hex}"
+    storage = PostgresStorage(dsn=dsn, schema=schema)
+    storage.migrate()
+    harness = StorageHarness(storage=storage, backend="postgres")
+    try:
+        embedder = FakeEmbedder()
+        prepared = _prepare("m1", "hello world", embedder)
+        with storage.transaction() as conn:
+            storage.write_upsert(conn, prepared)
+
+        assert harness.count("chunks_live") == 1
+        with storage.transaction() as conn:
+            storage.soft_delete_document(conn, prepared.document_id, "gone")
+
+        # Base table keeps the tombstoned row; the view hides it.
+        assert harness.count("chunks") == 1
+        assert harness.count("chunks_live") == 0
+    finally:
+        with storage.database._connection() as conn:
+            conn.execute(sql.SQL("DROP SCHEMA IF EXISTS {} CASCADE").format(sql.Identifier(schema)))
+        storage.database.close()
+
+
+def test_postgres_connection_pool_is_bounded_and_concurrent() -> None:
+    """The Postgres backend serves reads from a bounded, thread-shared pool.
+
+    Asserts two things the thread-local design couldn't give us: (1) the pool
+    has a hard ``max_size`` ceiling, so concurrent request fan-out can't drift
+    toward the server's ``max_connections``; (2) many threads can read through
+    one shared pool concurrently and each get correct results (connections are
+    checked out per-operation, not pinned per-thread for the process lifetime).
+    """
+    dsn = os.getenv("TEST_POSTGRES_DSN")
+    if not dsn:
+        pytest.skip("TEST_POSTGRES_DSN not set")
+
+    import threading
+
+    import psycopg  # noqa: F401
+    from psycopg import sql
+
+    from librarian.storage.postgres import PostgresStorage
+
+    schema = f"librarian_test_{uuid.uuid4().hex}"
+    storage = PostgresStorage(dsn=dsn, schema=schema)
+    storage.migrate()
+    try:
+        embedder = FakeEmbedder()
+        with storage.transaction() as conn:
+            storage.write_upsert(conn, _prepare("m1", "hello world", embedder))
+
+        pool = storage.database._get_pool()
+        assert pool.max_size <= max(1, int(os.getenv("POSTGRES_POOL_MAX_SIZE", "10")))
+
+        # Fan a read out across more threads than the pool's max_size: every
+        # thread must still get the right answer, with checkouts queued behind
+        # the ceiling rather than each opening its own connection.
+        results: list[int] = []
+        errors: list[Exception] = []
+        lock = threading.Lock()
+
+        def _read() -> None:
+            try:
+                stats = storage.metadata.get_stats()
+                with lock:
+                    results.append(stats["document_count"])
+            except Exception as exc:
+                with lock:
+                    errors.append(exc)
+
+        threads = [threading.Thread(target=_read) for _ in range(pool.max_size * 3)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+
+        assert not errors
+        assert results == [1] * len(threads)
+    finally:
+        with storage.database._connection() as conn:
+            conn.execute(sql.SQL("DROP SCHEMA IF EXISTS {} CASCADE").format(sql.Identifier(schema)))
+        storage.database.close()
+
+
 def test_postgres_param_not_silently_skipped() -> None:
     """When TEST_POSTGRES_DSN is set, a Postgres run must actually happen.
 
@@ -444,6 +657,6 @@ def test_postgres_param_not_silently_skipped() -> None:
     try:
         assert storage.metadata.get_stats()["document_count"] == 0
     finally:
-        conn = storage.database._get_connection()
-        conn.execute(sql.SQL("DROP SCHEMA IF EXISTS {} CASCADE").format(sql.Identifier(schema)))
+        with storage.database._connection() as conn:
+            conn.execute(sql.SQL("DROP SCHEMA IF EXISTS {} CASCADE").format(sql.Identifier(schema)))
         storage.database.close()
