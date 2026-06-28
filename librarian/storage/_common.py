@@ -9,12 +9,32 @@ twins from drifting. (The genuinely dialect-specific SQL -- ``write_upsert`` /
 backend, since its body diverges.)
 """
 
+import re
 from datetime import date, datetime
 from typing import Any
 
 from librarian.types import EmbeddingModality
 
-__all__ = ["iso", "json_default", "modality_table"]
+__all__ = ["iso", "json_default", "modality_table", "validate_json_key"]
+
+# A ``modality_data`` JSON key is interpolated directly into a JSON path
+# expression in both backends' reprocess queries (sqlite ``json_extract`` and
+# Postgres ``->>``), so restrict it to a bare identifier to keep it injection-safe.
+_JSON_KEY_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+
+
+def validate_json_key(key: str) -> str:
+    """Return ``key`` if it is a safe JSON object key, else raise ``ValueError``.
+
+    Used to guard keys that are interpolated into a JSON-path SQL expression
+    (they cannot be bound as parameters). Only plain identifiers are allowed.
+    """
+    if not _JSON_KEY_RE.match(key):
+        raise ValueError(
+            f"Invalid modality_data key {key!r}; expected a bare identifier "
+            "such as 'processing_status'."
+        )
+    return key
 
 
 def modality_table(modality: EmbeddingModality) -> str:

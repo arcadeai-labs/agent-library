@@ -104,6 +104,9 @@ class SearchHit(TypedDict):
     chunk_index: int | None
     document_size: int | None
     source_created_at: str | None
+    # Type-specific metadata (e.g. ``{"processing_status": "failed"}`` for an
+    # image whose VLM caption errored). Present only when the chunk carries it.
+    modality_data: dict[str, Any] | None
 
 
 class _ReadOutputRequired(TypedDict):

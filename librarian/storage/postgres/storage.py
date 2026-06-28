@@ -24,6 +24,7 @@ from librarian.config import POSTGRES_DSN, POSTGRES_SCHEMA
 from librarian.storage._common import iso as _iso
 from librarian.storage._common import json_default as _json_default
 from librarian.storage._common import modality_table as _modality_table
+from librarian.storage._common import validate_json_key as _validate_json_key
 from librarian.storage.postgres.database import (
     PostgresDatabase,
     parse_vector,
@@ -34,6 +35,7 @@ from librarian.storage.postgres.migrate import migrate as migrate_schema
 from librarian.storage.postgres.vector_store import PgVectorStore
 from librarian.storage.protocols import SyncState
 from librarian.storage.write_models import PreparedDocument
+from librarian.types import AssetType
 
 logger = logging.getLogger(__name__)
 
@@ -216,6 +218,30 @@ class PostgresStorage:
         ).fetchall()
         return {row["chunk_id"]: (row["content"], parse_vector(row["embedding"])) for row in rows}
 
+    def documents_to_reprocess(
+        self, asset_type: AssetType, status_key: str, status_value: str
+    ) -> list[str]:
+        """Return distinct paths of live documents owning a matching chunk.
+
+        Postgres peer of :meth:`SQLiteStorage.documents_to_reprocess`: a document
+        matches when it has a non-deleted chunk of ``asset_type`` whose
+        ``modality_data->>status_key`` equals ``status_value``.
+        """
+        key = _validate_json_key(status_key)
+        conn = self._db._get_connection()
+        rows = conn.execute(
+            f"""
+            SELECT DISTINCT d.path
+            FROM chunks c
+            JOIN documents d ON d.id = c.document_id
+            WHERE c.asset_type = %s
+              AND c.deleted_at IS NULL
+              AND c.modality_data->>'{key}' = %s
+            """,  # noqa: S608 - key validated to a bare identifier
+            (asset_type.value, status_value),
+        ).fetchall()
+        return [row["path"] for row in rows]
+
     def write_upsert(self, conn: Any, prepared: PreparedDocument) -> None:
         """Create-or-replace a document and all its chunks within ``conn``'s txn."""
         doc_pk = self._upsert_document_row(conn, prepared)
@@ -286,13 +312,19 @@ class PostgresStorage:
         # ingest latency for large documents -- switch to a multi-row
         # INSERT...RETURNING (psycopg execute_values) + bulk embedding insert.
         for chunk in prepared.chunks:
+            modality_data_json = (
+                json.dumps(chunk.modality_data, default=_json_default)
+                if chunk.modality_data
+                else None
+            )
             row = conn.execute(
                 """
                 INSERT INTO chunks (
                     document_id, chunk_id, content, heading_path, chunk_index,
                     start_char, end_char, asset_type, modality, document_size,
-                    source_created_at, document_source_uri, chunk_source_uri
-                ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                    source_created_at, document_source_uri, chunk_source_uri,
+                    modality_data
+                ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s::jsonb)
                 RETURNING id
                 """,
                 (
@@ -309,6 +341,7 @@ class PostgresStorage:
                     _iso(prepared.source_created_at),
                     prepared.document_source_uri,
                     chunk.chunk_source_uri,
+                    modality_data_json,
                 ),
             ).fetchone()
             chunk_pk = row["id"]

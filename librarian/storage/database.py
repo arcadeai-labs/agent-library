@@ -61,6 +61,19 @@ __all__ = [
 ]
 
 
+def _loads_or_none(value: Any) -> dict[str, Any] | None:
+    """Parse a JSON text column into a dict, tolerating NULL/empty/invalid."""
+    if not value:
+        return None
+    if isinstance(value, dict):
+        return value
+    try:
+        parsed = json.loads(value)
+    except (TypeError, ValueError):
+        return None
+    return parsed if isinstance(parsed, dict) else None
+
+
 def serialize_embedding(embedding: list[float]) -> bytes:
     """
     Serialize a list of floats to bytes for sqlite-vec storage.
@@ -418,7 +431,7 @@ class Database:
             rows = conn.execute(
                 f"""
                 SELECT id, chunk_id, chunk_index, document_size,
-                       source_created_at, chunk_source_uri
+                       source_created_at, chunk_source_uri, modality_data
                 FROM chunks WHERE id IN ({placeholders})
                 """,  # noqa: S608 - placeholders are parameter markers
                 tuple(chunk_ids),
@@ -430,6 +443,7 @@ class Database:
                 "document_size": row["document_size"],
                 "source_created_at": row["source_created_at"],
                 "chunk_source_uri": row["chunk_source_uri"],
+                "modality_data": _loads_or_none(row["modality_data"]),
             }
             for row in rows
         }
