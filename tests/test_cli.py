@@ -231,3 +231,41 @@ def test_usage_hints_use_configured_prog_name(monkeypatch: pytest.MonkeyPatch) -
     assert result.exit_code == 0
     assert "cade mem add" in result.output
     assert "libr add" not in result.output
+
+
+def test_save_sources_keeps_previous_file_when_write_is_interrupted(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A crash mid-save must not leave a truncated sources.json behind."""
+    monkeypatch.setattr(cli, "CONFIG_DIR", tmp_path)
+    monkeypatch.setattr(cli, "SOURCES_FILE", tmp_path / "sources.json")
+    original_sources = [{"name": "kept.md", "path": "/docs/kept.md"}]
+    cli._save_sources(original_sources)
+
+    def interrupted_dump(obj: Any, fp: Any, **kwargs: Any) -> None:
+        fp.write('[\n  {\n    "name"')
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(cli.json, "dump", interrupted_dump)
+    with pytest.raises(KeyboardInterrupt):
+        cli._save_sources([{"name": "new.md", "path": "/docs/new.md"}])
+
+    assert cli._load_sources() == original_sources
+    assert list(tmp_path.iterdir()) == [tmp_path / "sources.json"]
+
+
+def test_list_reports_corrupt_sources_file_without_traceback(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A corrupt sources.json fails with a message naming the file."""
+    sources_file = tmp_path / "sources.json"
+    sources_file.write_text('[\n  {\n    "name"', encoding="utf-8")
+    monkeypatch.setattr(cli, "SOURCES_FILE", sources_file)
+    monkeypatch.setattr(cli, "console", Console(width=500, color_system=None))
+    monkeypatch.setenv("COLUMNS", "500")
+
+    result = CliRunner().invoke(cli.app, ["list"])
+
+    assert result.exit_code == 1
+    assert str(sources_file) in result.output
+    assert not isinstance(result.exception, ValueError)
