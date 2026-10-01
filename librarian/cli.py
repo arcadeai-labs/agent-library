@@ -23,6 +23,7 @@ import json
 import os
 import subprocess
 import sys
+import tempfile
 from datetime import datetime
 from enum import Enum
 from pathlib import Path
@@ -140,35 +141,56 @@ class Timeframe(str, Enum):
 # =============================================================================
 
 
+def _read_json_config(path: Path) -> Any:
+    """Read a JSON config file, exiting with a clear message if it is corrupt."""
+    try:
+        with open(path) as f:
+            return json.load(f)
+    except json.JSONDecodeError as e:
+        rprint(f"[red]Error:[/red] {path} is not valid JSON ({e}). Fix or remove it, then retry.")
+        raise typer.Exit(1) from None
+
+
+def _write_json_config(path: Path, config: Any) -> None:
+    """Write a JSON config file atomically so an interrupted save never truncates it."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with tempfile.NamedTemporaryFile(
+        "w", dir=path.parent, prefix=f".{path.name}.", suffix=".tmp", delete=False
+    ) as tmp:
+        tmp_path = Path(tmp.name)
+        try:
+            json.dump(config, tmp, indent=2)
+        except BaseException:
+            tmp.close()
+            tmp_path.unlink()
+            raise
+    os.replace(tmp_path, path)
+
+
 def _load_sources() -> list[dict[str, Any]]:
     """Load registered sources from config."""
     if not SOURCES_FILE.exists():
         return []
-    with open(SOURCES_FILE) as f:
-        result: list[dict[str, Any]] = json.load(f)
-        return result
+    result: list[dict[str, Any]] = _read_json_config(SOURCES_FILE)
+    return result
 
 
 def _save_sources(sources: list[dict[str, Any]]) -> None:
     """Save sources to config."""
-    CONFIG_DIR.mkdir(parents=True, exist_ok=True)
-    with open(SOURCES_FILE, "w") as f:
-        json.dump(sources, f, indent=2)
+    _write_json_config(SOURCES_FILE, sources)
 
 
 def _load_settings() -> dict[str, Any]:
     """Load user settings from config."""
     if not SETTINGS_FILE.exists():
         return {}
-    with open(SETTINGS_FILE) as f:
-        return json.load(f)
+    result: dict[str, Any] = _read_json_config(SETTINGS_FILE)
+    return result
 
 
 def _save_settings(settings: dict[str, Any]) -> None:
     """Save user settings to config."""
-    CONFIG_DIR.mkdir(parents=True, exist_ok=True)
-    with open(SETTINGS_FILE, "w") as f:
-        json.dump(settings, f, indent=2)
+    _write_json_config(SETTINGS_FILE, settings)
 
 
 def _run_async(coro: Any) -> Any:
